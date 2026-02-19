@@ -1,8 +1,9 @@
 import axios from 'axios';
+import { PUBLIC_API_BASE_URL } from '$env/static/public';
 import type { User, TokenResponse, NaratelFile, UploadResponse } from './types';
 
 export const api = axios.create({
-	baseURL: 'http://localhost:8080/api/v1',
+	baseURL: `${PUBLIC_API_BASE_URL}/api/v1`,
 	headers: { 'Content-Type': 'application/json' }
 });
 
@@ -59,12 +60,12 @@ export async function deleteFile(id: number): Promise<void> {
 export function downloadUrl(id: number): string {
 	const token = localStorage.getItem('token');
 	// Return a URL — download triggered via anchor with auth header via fetch
-	return `http://localhost:8080/api/v1/files/${id}?token=${token}`;
+	return `${PUBLIC_API_BASE_URL}/api/v1/files/${id}?token=${token}`;
 }
 
 export async function downloadFile(id: number, name: string): Promise<void> {
 	const token = localStorage.getItem('token');
-	const res = await fetch(`http://localhost:8080/api/v1/files/${id}`, {
+	const res = await fetch(`${PUBLIC_API_BASE_URL}/api/v1/files/${id}`, {
 		headers: { Authorization: `Bearer ${token}` }
 	});
 	if (!res.ok) throw new Error('Download failed');

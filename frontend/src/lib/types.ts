@@ -30,3 +30,7 @@ export interface ApiError {
 	error: string;
 	message: string;
 }
+
+export type ViewMode = 'grid' | 'list';
+export type SortField = 'name' | 'total_size' | 'created_at';
+export type SortDir = 'asc' | 'desc';
