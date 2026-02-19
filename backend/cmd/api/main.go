@@ -113,10 +113,14 @@ func main() {
 	authGroup.Post("/register", authHandler.Register)
 	authGroup.Post("/login", authHandler.Login)
 
+	// Protected auth routes
+	authGroup.Get("/me", auth.Middleware(cfg.JWTSecret), authHandler.Me)
+
 	// Protected (JWT required)
 	files := api.Group("/files", auth.Middleware(cfg.JWTSecret))
 	files.Post("/", uploadHandler.Upload)
 	files.Get("/", uploadHandler.ListFiles)
+	files.Get("/:id/info", uploadHandler.FileInfo)
 	files.Get("/:id", downloadHandler.Download)
 	files.Delete("/:id", downloadHandler.DeleteFile)
 

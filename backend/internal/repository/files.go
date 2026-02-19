@@ -86,9 +86,6 @@ func (r *FileRepository) Delete(ctx context.Context, fileID, userID int64) error
 
 // LinkBlocks inserts file_blocks rows linking ordered block IDs to a file.
 func (r *FileRepository) LinkBlocks(ctx context.Context, fileID int64, blockIDs []int64) error {
-	batch := &pgxpool.Pool{}
-	_ = batch // use direct loop for clarity
-
 	for i, blockID := range blockIDs {
 		_, err := r.db.Exec(ctx,
 			`INSERT INTO file_blocks (file_id, block_id, block_index) VALUES ($1, $2, $3)`,

@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"errors"
+
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naratel/naratel-box/backend/internal/model"
 )
@@ -26,7 +29,7 @@ func (r *BlockRepository) FindByHash(ctx context.Context, hash string) (*model.B
 	).Scan(&block.ID, &block.SHA256Hash, &block.S3Key, &block.SizeBytes, &block.RefCount, &block.CreatedAt)
 	if err != nil {
 		// pgx returns pgx.ErrNoRows when no row found
-		if err.Error() == "no rows in result set" {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("BlockRepository.FindByHash: %w", err)

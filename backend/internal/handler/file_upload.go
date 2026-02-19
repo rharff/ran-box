@@ -3,11 +3,13 @@ package handler
 import (
 	"mime"
 	"path/filepath"
+	"strconv"
 
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/naratel/naratel-box/backend/internal/auth"
 	"github.com/naratel/naratel-box/backend/internal/block"
+	"github.com/naratel/naratel-box/backend/internal/model"
 	"github.com/naratel/naratel-box/backend/internal/repository"
 )
 
@@ -128,8 +130,41 @@ func (h *UploadHandler) ListFiles(c *fiber.Ctx) error {
 
 	files, err := h.fileRepo.ListByUserID(c.Context(), userID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "db_error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{Error: "db_error", Message: "failed to list files"})
+	}
+	if files == nil {
+		files = []*model.File{}
+	}
+	return c.JSON(files)
+}
+
+// FileInfo godoc
+// @Summary      Get file metadata
+// @Description  Returns metadata for a single file without downloading it
+// @Tags         files
+// @Produce      json
+// @Param        id  path     int true "File ID"
+// @Success      200 {object} model.File
+// @Failure      400 {object} ErrorResponse
+// @Failure      401 {object} ErrorResponse
+// @Failure      403 {object} ErrorResponse
+// @Security     BearerAuth
+// @Router       /files/{id}/info [get]
+func (h *UploadHandler) FileInfo(c *fiber.Ctx) error {
+	userID, ok := auth.GetUserID(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(ErrorResponse{Error: "unauthorized", Message: "missing token"})
 	}
 
-	return c.JSON(files)
+	fileID, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "invalid file id"})
+	}
+
+	file, err := h.fileRepo.FindByIDAndUserID(c.Context(), fileID, userID)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(ErrorResponse{Error: "forbidden", Message: "file not found or unauthorized"})
+	}
+
+	return c.JSON(file)
 }

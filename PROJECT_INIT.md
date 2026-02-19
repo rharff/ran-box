@@ -1,7 +1,7 @@
 # Naratel Box — Project Initialization Guide
 
 > A self-hosted file storage system with block-level deduplication, streaming upload/download, and JWT-based access control.  
-> Stack: **Go (Backend API)** · **PostgreSQL (Metadata)** · **QNAP S3 (Block Storage)** · **React + Vite (Frontend MVP)**
+> Stack: **Go (Backend API)** · **PostgreSQL (Metadata)** · **QNAP S3 (Block Storage)** · **SvelteKit + Vite (Frontend MVP)**
 
 ---
 
@@ -14,7 +14,7 @@
 5. [Environment Variables](#environment-variables)
 6. [Database Schema](#database-schema)
 7. [Backend Setup (Go)](#backend-setup-go)
-8. [Frontend Setup (React + Vite)](#frontend-setup-react--vite)
+8. [Frontend Setup (SvelteKit)](#frontend-setup-sveltekit)
 9. [API Contract](#api-contract)
 10. [Running the Project](#running-the-project)
 11. [Docker Compose](#docker-compose)
@@ -26,7 +26,7 @@
 ```
 ┌─────────────┐        ┌──────────────────┐        ┌─────────────────┐        ┌──────────────┐
 │   Frontend  │──JWT──▶│  Backend (Go)    │──SQL──▶│  PostgreSQL     │        │  QNAP S3     │
-│  React+Vite │◀───────│  Fiber / Chi     │        │  (Metadata +    │        │  (Block      │
+│ SvelteKit   │◀───────│  Fiber / Chi     │        │  (Metadata +    │        │  (Block      │
 │             │        │                  │──S3───▶│   Block Index)  │        │   Objects)   │
 └─────────────┘        └──────────────────┘        └─────────────────┘        └──────────────┘
 ```
@@ -90,23 +90,25 @@ naratel-box/
 │   ├── go.mod
 │   └── go.sum
 │
-└── frontend/                ← React + Vite MVP
+└── frontend/                ← SvelteKit MVP
     ├── src/
-    │   ├── api/             ← Axios client + API calls
-    │   │   └── client.ts
-    │   ├── components/
-    │   │   ├── FileUpload.tsx
-    │   │   ├── FileList.tsx
-    │   │   └── DownloadButton.tsx
-    │   ├── pages/
-    │   │   ├── LoginPage.tsx
-    │   │   └── DashboardPage.tsx
-    │   ├── store/           ← Zustand state
-    │   │   └── authStore.ts
-    │   ├── App.tsx
-    │   └── main.tsx
-    ├── index.html
+    │   ├── lib/
+    │   │   ├── api/         ← fetch client + API calls
+    │   │   │   └── client.ts
+    │   │   ├── components/
+    │   │   │   ├── FileUpload.svelte
+    │   │   │   ├── FileList.svelte
+    │   │   │   └── DownloadButton.svelte
+    │   │   └── stores/      ← Svelte stores (auth state)
+    │   │       └── authStore.ts
+    │   ├── routes/
+    │   │   ├── +layout.svelte
+    │   │   ├── +page.svelte          ← Dashboard
+    │   │   └── login/
+    │   │       └── +page.svelte      ← Login
+    │   └── app.html
     ├── package.json
+    ├── svelte.config.js
     ├── tsconfig.json
     └── vite.config.ts
 ```
@@ -307,34 +309,39 @@ go get golang.org/x/crypto
 
 ---
 
-## Frontend Setup (React + Vite)
+## Frontend Setup (SvelteKit)
 
 ### 1. Initialize project
 
 ```bash
 cd frontend
-npm create vite@latest . -- --template react-ts
+npx sv create . --template minimal --types ts
 npm install
 ```
 
 ### 2. Install dependencies
 
 ```bash
-npm install axios zustand react-router-dom
-npm install -D tailwindcss postcss autoprefixer
-npx tailwindcss init -p
+npm install -D tailwindcss @tailwindcss/vite
 ```
 
-### 3. Key pages
+> **Note:** SvelteKit uses the native `fetch` API — no Axios needed. Auth state is managed with Svelte stores — no Zustand needed. Routing is file-system based — no `react-router-dom` needed.
 
-| Page | Route | Description |
+### 3. Key routes
+
+| Route file | URL | Description |
 |---|---|---|
-| `LoginPage` | `/login` | Email + password form → calls `POST /api/v1/auth/login` → stores JWT in Zustand + localStorage |
-| `DashboardPage` | `/` | Lists user's files, upload button, download button |
+| `src/routes/login/+page.svelte` | `/login` | Email + password form → calls `POST /api/v1/auth/login` → stores JWT in a Svelte writable store + `localStorage` |
+| `src/routes/+page.svelte` | `/` | Dashboard — lists user's files, upload button, download button |
 
-### 4. Upload strategy (frontend)
+### 4. Auth store (`src/lib/stores/authStore.ts`)
+- Use a Svelte `writable` store to hold `{ token, expiresAt }` state
+- Persist to `localStorage` on write; hydrate on app load via `+layout.svelte`
+- Export a derived `isAuthenticated` store for route guards
+
+### 5. Upload strategy (frontend)
 - Use `FormData` with `Content-Type: multipart/form-data`
-- Show upload progress via `onUploadProgress` in Axios
+- Track progress via the `XMLHttpRequest` upload events or a `ReadableStream` wrapper
 - The **backend handles all block splitting** — frontend sends the raw file as a single stream
 
 ---

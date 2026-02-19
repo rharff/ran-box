@@ -37,46 +37,40 @@ func NewDownloadHandler(
 // @Produce      application/octet-stream
 // @Param        id  path     int true "File ID"
 // @Success      200 {file}   binary "File stream"
-// @Failure      400 {object} map[string]interface{} "invalid file id"
-// @Failure      401 {object} map[string]interface{} "unauthorized"
-// @Failure      403 {object} map[string]interface{} "forbidden"
-// @Failure      500 {object} map[string]interface{} "db_error"
+// @Failure      400 {object} ErrorResponse
+// @Failure      401 {object} ErrorResponse
+// @Failure      403 {object} ErrorResponse
+// @Failure      500 {object} ErrorResponse
 // @Security     BearerAuth
 // @Router       /files/{id} [get]
 func (h *DownloadHandler) Download(c *fiber.Ctx) error {
 	userID, ok := auth.GetUserID(c)
 	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+		return c.Status(fiber.StatusUnauthorized).JSON(ErrorResponse{Error: "unauthorized", Message: "missing token"})
 	}
 
 	fileID, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "bad_request",
-			"message": "invalid file id",
-		})
+		return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "invalid file id"})
 	}
 
 	// ── AUTHORIZATION CHECK ──
 	// FindByIDAndUserID returns error/nil if file doesn't belong to this user
 	file, err := h.fileRepo.FindByIDAndUserID(c.Context(), fileID, userID)
 	if err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error":   "forbidden",
-			"message": "you do not have access to this file",
-		})
+		return c.Status(fiber.StatusForbidden).JSON(ErrorResponse{Error: "forbidden", Message: "you do not have access to this file"})
 	}
 
 	// Fetch ordered block IDs for this file
 	blockIDs, err := h.fileRepo.GetBlockIDs(c.Context(), file.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "db_error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{Error: "db_error", Message: "failed to fetch block ids"})
 	}
 
 	// Fetch block metadata (S3 keys)
 	blocks, err := h.blockRepo.FindByIDs(c.Context(), blockIDs)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "db_error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{Error: "db_error", Message: "failed to fetch blocks"})
 	}
 
 	// Set response headers before streaming
@@ -104,37 +98,32 @@ func (h *DownloadHandler) Download(c *fiber.Ctx) error {
 // @Produce      json
 // @Param        id  path     int true "File ID"
 // @Success      204 "No Content"
-// @Failure      400 {object} map[string]interface{} "invalid file id"
-// @Failure      401 {object} map[string]interface{} "unauthorized"
-// @Failure      403 {object} map[string]interface{} "file not found or unauthorized"
+// @Failure      400 {object} ErrorResponse
+// @Failure      401 {object} ErrorResponse
+// @Failure      403 {object} ErrorResponse
+// @Failure      500 {object} ErrorResponse
 // @Security     BearerAuth
 // @Router       /files/{id} [delete]
 func (h *DownloadHandler) DeleteFile(c *fiber.Ctx) error {
 	userID, ok := auth.GetUserID(c)
 	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+		return c.Status(fiber.StatusUnauthorized).JSON(ErrorResponse{Error: "unauthorized", Message: "missing token"})
 	}
 
 	fileID, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "bad_request",
-			"message": "invalid file id",
-		})
+		return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "invalid file id"})
 	}
 
 	// Fetch block IDs before deleting the file (cascade would remove file_blocks)
 	blockIDs, err := h.fileRepo.GetBlockIDs(c.Context(), fileID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "db_error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{Error: "db_error", Message: "failed to fetch block ids"})
 	}
 
 	// Delete file record (also cascades file_blocks)
 	if err := h.fileRepo.Delete(c.Context(), fileID, userID); err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error":   "forbidden",
-			"message": "file not found or unauthorized",
-		})
+		return c.Status(fiber.StatusForbidden).JSON(ErrorResponse{Error: "forbidden", Message: "file not found or unauthorized"})
 	}
 
 	// Decrement ref_count for each block; delete from S3 + DB if orphaned
