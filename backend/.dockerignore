@@ -1,0 +1,38 @@
+# Exclude VCS and metadata
+.git
+.gitignore
+
+# Local env files
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+bin/
+build/
+dist/
+*.exe
+*.exe~
+*.test
+*.out
+coverage.out
+
+# Vendor and caches
+vendor/
+node_modules/
+.cache/
+
+# IDEs and editors
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Don't exclude go.mod and go.sum (needed for Go builds)
+!go.mod
+!go.sum

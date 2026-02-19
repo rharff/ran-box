@@ -1,0 +1,299 @@
+basePath: /api/v1
+definitions:
+  handler.ErrorResponse:
+    properties:
+      error:
+        example: unauthorized
+        type: string
+      message:
+        example: invalid email or password
+        type: string
+    type: object
+  handler.LoginRequest:
+    properties:
+      email:
+        example: user@example.com
+        type: string
+      password:
+        example: supersecret123
+        type: string
+    type: object
+  handler.RegisterRequest:
+    properties:
+      email:
+        example: user@example.com
+        type: string
+      password:
+        example: supersecret123
+        type: string
+    type: object
+  handler.TokenResponse:
+    properties:
+      expires_at:
+        example: "2026-02-19T10:00:00Z"
+        type: string
+      token:
+        example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        type: string
+    type: object
+  handler.UploadResponse:
+    properties:
+      blocks_count:
+        example: 3
+        type: integer
+      created_at:
+        example: "2026-02-18T12:00:00Z"
+        type: string
+      file_id:
+        example: 42
+        type: integer
+      mime_type:
+        example: application/pdf
+        type: string
+      name:
+        example: report.pdf
+        type: string
+      size:
+        example: 8388608
+        type: integer
+    type: object
+  model.File:
+    properties:
+      created_at:
+        type: string
+      id:
+        type: integer
+      mime_type:
+        type: string
+      name:
+        type: string
+      total_size:
+        type: integer
+      updated_at:
+        type: string
+      user_id:
+        type: integer
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: dev@naratel.id
+    name: Naratel Dev Team
+  description: Block-level deduplicated file storage with JWT authentication and QNAP
+    S3 backend.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: http://naratel.id/terms
+  title: Naratel Box API
+  version: "1.0"
+paths:
+  /auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Authenticate with email and password, receive a JWT token
+      parameters:
+      - description: Login payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.TokenResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      summary: Login
+      tags:
+      - auth
+  /auth/register:
+    post:
+      consumes:
+      - application/json
+      description: Create a new account with email and password
+      parameters:
+      - description: Register payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.RegisterRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: user_id and email
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      summary: Register a new user
+      tags:
+      - auth
+  /files:
+    get:
+      description: Returns all files owned by the authenticated user
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/model.File'
+            type: array
+        "401":
+          description: unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: db_error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: List files
+      tags:
+      - files
+    post:
+      consumes:
+      - multipart/form-data
+      description: Upload a file using multipart/form-data. The backend splits it
+        into 8MB blocks, deduplicates, and stores in S3.
+      parameters:
+      - description: File to upload
+        in: formData
+        name: file
+        required: true
+        type: file
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/handler.UploadResponse'
+        "400":
+          description: bad_request
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: upload_failed
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Upload a file
+      tags:
+      - files
+  /files/{id}:
+    delete:
+      description: Delete a file by ID. Decrements block ref counts and removes orphaned
+        blocks from S3.
+      parameters:
+      - description: File ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: invalid file id
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "403":
+          description: file not found or unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Delete a file
+      tags:
+      - files
+    get:
+      description: Stream a file by ID. Returns 403 if the file does not belong to
+        the authenticated user.
+      parameters:
+      - description: File ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: File stream
+          schema:
+            type: file
+        "400":
+          description: invalid file id
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "403":
+          description: forbidden
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: db_error
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Download a file
+      tags:
+      - files
+securityDefinitions:
+  BearerAuth:
+    description: 'Enter: Bearer <your_jwt_token>'
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
