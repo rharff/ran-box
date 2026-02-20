@@ -2,9 +2,10 @@ package handler
 
 import (
 	"fmt"
+	"net/http"
 	"strconv"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/go-chi/chi/v5"
 
 	"github.com/naratel/naratel-box/backend/internal/auth"
 	"github.com/naratel/naratel-box/backend/internal/block"
@@ -43,34 +44,38 @@ func NewDownloadHandler(
 // @Failure      500 {object} ErrorResponse
 // @Security     BearerAuth
 // @Router       /files/{id} [get]
-func (h *DownloadHandler) Download(c *fiber.Ctx) error {
-	userID, ok := auth.GetUserID(c)
+func (h *DownloadHandler) Download(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.GetUserID(r)
 	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(ErrorResponse{Error: "unauthorized", Message: "missing token"})
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing token"})
+		return
 	}
 
-	fileID, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	fileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "invalid file id"})
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid file id"})
+		return
 	}
 
 	// ── AUTHORIZATION CHECK ──
-	// FindByIDAndUserID returns error/nil if file doesn't belong to this user
-	file, err := h.fileRepo.FindByIDAndUserID(c.Context(), fileID, userID)
+	file, err := h.fileRepo.FindByIDAndUserID(r.Context(), fileID, userID)
 	if err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(ErrorResponse{Error: "forbidden", Message: "you do not have access to this file"})
+		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: "forbidden", Message: "you do not have access to this file"})
+		return
 	}
 
 	// Fetch ordered block IDs for this file
-	blockIDs, err := h.fileRepo.GetBlockIDs(c.Context(), file.ID)
+	blockIDs, err := h.fileRepo.GetBlockIDs(r.Context(), file.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{Error: "db_error", Message: "failed to fetch block ids"})
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to fetch block ids"})
+		return
 	}
 
 	// Fetch block metadata (S3 keys)
-	blocks, err := h.blockRepo.FindByIDs(c.Context(), blockIDs)
+	blocks, err := h.blockRepo.FindByIDs(r.Context(), blockIDs)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{Error: "db_error", Message: "failed to fetch blocks"})
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to fetch blocks"})
+		return
 	}
 
 	// Set response headers before streaming
@@ -78,17 +83,15 @@ func (h *DownloadHandler) Download(c *fiber.Ctx) error {
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
-	c.Set("Content-Type", mimeType)
-	c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, file.Name))
-	c.Set("Content-Length", strconv.FormatInt(file.TotalSize, 10))
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, file.Name))
+	w.Header().Set("Content-Length", strconv.FormatInt(file.TotalSize, 10))
 
 	// Stream blocks directly to response writer
-	if err := block.BlocksToStream(c.Context(), blocks, h.s3, c.Response().BodyWriter()); err != nil {
+	if err := block.BlocksToStream(r.Context(), blocks, h.s3, w); err != nil {
 		// Headers already sent; log the error but can't change status
-		return err
+		return
 	}
-
-	return nil
 }
 
 // DeleteFile godoc
@@ -104,42 +107,46 @@ func (h *DownloadHandler) Download(c *fiber.Ctx) error {
 // @Failure      500 {object} ErrorResponse
 // @Security     BearerAuth
 // @Router       /files/{id} [delete]
-func (h *DownloadHandler) DeleteFile(c *fiber.Ctx) error {
-	userID, ok := auth.GetUserID(c)
+func (h *DownloadHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.GetUserID(r)
 	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(ErrorResponse{Error: "unauthorized", Message: "missing token"})
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing token"})
+		return
 	}
 
-	fileID, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	fileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "invalid file id"})
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid file id"})
+		return
 	}
 
 	// Fetch block IDs before deleting the file (cascade would remove file_blocks)
-	blockIDs, err := h.fileRepo.GetBlockIDs(c.Context(), fileID)
+	blockIDs, err := h.fileRepo.GetBlockIDs(r.Context(), fileID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{Error: "db_error", Message: "failed to fetch block ids"})
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to fetch block ids"})
+		return
 	}
 
 	// Delete file record (also cascades file_blocks)
-	if err := h.fileRepo.Delete(c.Context(), fileID, userID); err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(ErrorResponse{Error: "forbidden", Message: "file not found or unauthorized"})
+	if err := h.fileRepo.Delete(r.Context(), fileID, userID); err != nil {
+		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: "forbidden", Message: "file not found or unauthorized"})
+		return
 	}
 
 	// Decrement ref_count for each block; delete from S3 + DB if orphaned
-	blocks, err := h.blockRepo.FindByIDs(c.Context(), blockIDs)
+	blocks, err := h.blockRepo.FindByIDs(r.Context(), blockIDs)
 	if err == nil {
 		for _, b := range blocks {
-			newCount, err := h.blockRepo.DecrementRefCount(c.Context(), b.ID)
+			newCount, err := h.blockRepo.DecrementRefCount(r.Context(), b.ID)
 			if err != nil {
 				continue // log in production
 			}
 			if newCount <= 0 {
-				_ = h.s3.DeleteObject(c.Context(), b.S3Key)
-				_ = h.blockRepo.Delete(c.Context(), b.ID)
+				_ = h.s3.DeleteObject(r.Context(), b.S3Key)
+				_ = h.blockRepo.Delete(r.Context(), b.ID)
 			}
 		}
 	}
 
-	return c.SendStatus(fiber.StatusNoContent)
+	w.WriteHeader(http.StatusNoContent)
 }

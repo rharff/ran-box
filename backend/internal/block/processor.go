@@ -14,7 +14,7 @@ import (
 	"github.com/naratel/naratel-box/backend/internal/storage"
 )
 
-const maxWorkers = 4 // concurrent block upload workers
+const maxWorkers = 8 // concurrent block upload workers
 
 // blockJob carries a single block's data to a worker.
 type blockJob struct {
@@ -46,68 +46,16 @@ func NewProcessor(blockSizeBytes int, blockRepo *repository.BlockRepository, s3 
 	}
 }
 
-// Process reads the full file from r, splits it into blocks, deduplicates,
-// uploads new blocks to S3, and returns ordered block IDs and total bytes read.
+// Process streams r block-by-block into a worker pool.
+// Only maxWorkers blocks are held in memory at any time — O(workers × blockSize)
+// memory regardless of total file size, so a 10GB file uses the same RAM as a 10MB file.
 func (p *Processor) Process(ctx context.Context, r io.Reader) ([]int64, int64, error) {
-	// Read and split the stream into block-sized chunks
-	jobs, totalBytes, err := p.splitStream(r)
-	if err != nil {
-		return nil, 0, fmt.Errorf("Processor.splitStream: %w", err)
-	}
+	// jobCh is bounded to maxWorkers so the reader blocks when all workers are busy,
+	// preventing unbounded memory growth.
+	jobCh    := make(chan blockJob, maxWorkers)
+	resultCh := make(chan blockResult, maxWorkers)
 
-	// Process blocks concurrently with a worker pool
-	results, err := p.runWorkers(ctx, jobs)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// Sort results by index to preserve block order
-	ordered := make([]int64, len(results))
-	for _, res := range results {
-		ordered[res.index] = res.blockID
-	}
-
-	return ordered, totalBytes, nil
-}
-
-// splitStream reads r in blockSize chunks and returns a slice of blockJobs.
-func (p *Processor) splitStream(r io.Reader) ([]blockJob, int64, error) {
-	var jobs []blockJob
-	var totalBytes int64
-	index := 0
-
-	buf := make([]byte, p.blockSize)
-	for {
-		n, err := io.ReadFull(r, buf)
-		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
-
-			hash := sha256Block(data)
-			jobs = append(jobs, blockJob{
-				index: index,
-				data:  data,
-				hash:  hash,
-			})
-			totalBytes += int64(n)
-			index++
-		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
-		}
-		if err != nil {
-			return nil, 0, fmt.Errorf("splitStream read error: %w", err)
-		}
-	}
-	return jobs, totalBytes, nil
-}
-
-// runWorkers fans out block jobs to a pool of workers and collects results.
-func (p *Processor) runWorkers(ctx context.Context, jobs []blockJob) ([]blockResult, error) {
-	jobCh := make(chan blockJob, len(jobs))
-	resultCh := make(chan blockResult, len(jobs))
-
-	// Start workers
+	// Start the fixed worker pool.
 	var wg sync.WaitGroup
 	for i := 0; i < maxWorkers; i++ {
 		wg.Add(1)
@@ -120,27 +68,57 @@ func (p *Processor) runWorkers(ctx context.Context, jobs []blockJob) ([]blockRes
 		}()
 	}
 
-	// Send all jobs
-	for _, job := range jobs {
-		jobCh <- job
-	}
-	close(jobCh)
-
-	// Wait then close results
+	// Close resultCh once all workers finish.
 	go func() {
 		wg.Wait()
 		close(resultCh)
 	}()
 
-	// Collect results, fail fast on first error
+	// Read the file one block at a time and feed workers.
+	// This goroutine blocks on jobCh when all workers are busy, keeping memory bounded.
+	var totalBytes int64
+	var readErr   error
+	go func() {
+		defer close(jobCh)
+		buf   := make([]byte, p.blockSize)
+		index := 0
+		for {
+			n, err := io.ReadFull(r, buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				totalBytes += int64(n)
+				jobCh <- blockJob{index: index, data: data, hash: sha256Block(data)}
+				index++
+			}
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
+			if err != nil {
+				readErr = fmt.Errorf("splitStream read error: %w", err)
+				return
+			}
+		}
+	}()
+
+	// Collect results and preserve order.
 	var results []blockResult
 	for res := range resultCh {
 		if res.err != nil {
-			return nil, fmt.Errorf("worker error at block %d: %w", res.index, res.err)
+			return nil, 0, fmt.Errorf("worker error at block %d: %w", res.index, res.err)
 		}
 		results = append(results, res)
 	}
-	return results, nil
+
+	if readErr != nil {
+		return nil, 0, readErr
+	}
+
+	ordered := make([]int64, len(results))
+	for _, res := range results {
+		ordered[res.index] = res.blockID
+	}
+	return ordered, totalBytes, nil
 }
 
 // processBlock handles one block: check dedup → upload if new → return block ID.

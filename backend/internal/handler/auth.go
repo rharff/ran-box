@@ -1,63 +1,71 @@
 package handler
 
 import (
-"regexp"
-"time"
+	"encoding/json"
+	"net/http"
+	"regexp"
+	"time"
 
-"github.com/gofiber/fiber/v2"
-"golang.org/x/crypto/bcrypt"
+	"golang.org/x/crypto/bcrypt"
 
-"github.com/naratel/naratel-box/backend/internal/auth"
-"github.com/naratel/naratel-box/backend/internal/repository"
+	"github.com/naratel/naratel-box/backend/internal/auth"
+	"github.com/naratel/naratel-box/backend/internal/repository"
 )
 
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
 
 // RegisterRequest is the payload for POST /auth/register.
 type RegisterRequest struct {
-Email    string `json:"email"    example:"user@example.com"`
-Password string `json:"password" example:"supersecret123"`
+	Email    string `json:"email"    example:"user@example.com"`
+	Password string `json:"password" example:"supersecret123"`
 }
 
 // LoginRequest is the payload for POST /auth/login.
 type LoginRequest struct {
-Email    string `json:"email"    example:"user@example.com"`
-Password string `json:"password" example:"supersecret123"`
+	Email    string `json:"email"    example:"user@example.com"`
+	Password string `json:"password" example:"supersecret123"`
 }
 
 // TokenResponse is returned on successful login.
 type TokenResponse struct {
-Token     string    `json:"token"      example:"eyJhbGciOiJIUzI1NiJ9..."`
-ExpiresAt time.Time `json:"expires_at" example:"2026-02-19T10:00:00Z"`
+	Token     string    `json:"token"      example:"eyJhbGciOiJIUzI1NiJ9..."`
+	ExpiresAt time.Time `json:"expires_at" example:"2026-02-19T10:00:00Z"`
 }
 
 // UserResponse is returned for profile endpoints.
 type UserResponse struct {
-UserID    int64     `json:"user_id"    example:"5"`
-Email     string    `json:"email"      example:"user@example.com"`
-CreatedAt time.Time `json:"created_at" example:"2026-02-18T12:00:00Z"`
+	UserID    int64     `json:"user_id"    example:"5"`
+	Email     string    `json:"email"      example:"user@example.com"`
+	CreatedAt time.Time `json:"created_at" example:"2026-02-18T12:00:00Z"`
 }
 
 // ErrorResponse is the standard error envelope.
 type ErrorResponse struct {
-Error   string `json:"error"   example:"unauthorized"`
-Message string `json:"message" example:"invalid email or password"`
+	Error   string `json:"error"   example:"unauthorized"`
+	Message string `json:"message" example:"invalid email or password"`
 }
 
 // AuthHandler handles authentication endpoints.
 type AuthHandler struct {
-userRepo       *repository.UserRepository
-jwtSecret      string
-jwtExpiryHours int
+	userRepo       *repository.UserRepository
+	jwtSecret      string
+	jwtExpiryHours int
 }
 
 // NewAuthHandler creates a new AuthHandler.
 func NewAuthHandler(userRepo *repository.UserRepository, jwtSecret string, jwtExpiryHours int) *AuthHandler {
-return &AuthHandler{
-userRepo:       userRepo,
-jwtSecret:      jwtSecret,
-jwtExpiryHours: jwtExpiryHours,
+	return &AuthHandler{
+		userRepo:       userRepo,
+		jwtSecret:      jwtSecret,
+		jwtExpiryHours: jwtExpiryHours,
+	}
 }
+
+// writeJSON is a helper that writes a JSON response with the given status code.
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
 }
 
 // Register godoc
@@ -71,32 +79,38 @@ jwtExpiryHours: jwtExpiryHours,
 // @Failure      400  {object} ErrorResponse
 // @Failure      409  {object} ErrorResponse
 // @Router       /auth/register [post]
-func (h *AuthHandler) Register(c *fiber.Ctx) error {
-var req RegisterRequest
-if err := c.BodyParser(&req); err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "invalid JSON body"})
-}
-if req.Email == "" || req.Password == "" {
-return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "email and password are required"})
-}
-if !emailRegex.MatchString(req.Email) {
-return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "invalid email format"})
-}
-if len(req.Password) < 8 {
-return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "password must be at least 8 characters"})
-}
+func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
+	var req RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid JSON body"})
+		return
+	}
+	if req.Email == "" || req.Password == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "email and password are required"})
+		return
+	}
+	if !emailRegex.MatchString(req.Email) {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid email format"})
+		return
+	}
+	if len(req.Password) < 8 {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "password must be at least 8 characters"})
+		return
+	}
 
-hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-if err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{Error: "internal_error", Message: "failed to hash password"})
-}
+	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: "failed to hash password"})
+		return
+	}
 
-user, err := h.userRepo.Create(c.Context(), req.Email, string(hashed))
-if err != nil {
-return c.Status(fiber.StatusConflict).JSON(ErrorResponse{Error: "conflict", Message: "email already registered"})
-}
+	user, err := h.userRepo.Create(r.Context(), req.Email, string(hashed))
+	if err != nil {
+		writeJSON(w, http.StatusConflict, ErrorResponse{Error: "conflict", Message: "email already registered"})
+		return
+	}
 
-return c.Status(fiber.StatusCreated).JSON(UserResponse{UserID: user.ID, Email: user.Email, CreatedAt: user.CreatedAt})
+	writeJSON(w, http.StatusCreated, UserResponse{UserID: user.ID, Email: user.Email, CreatedAt: user.CreatedAt})
 }
 
 // Login godoc
@@ -110,30 +124,35 @@ return c.Status(fiber.StatusCreated).JSON(UserResponse{UserID: user.ID, Email: u
 // @Failure      400  {object} ErrorResponse
 // @Failure      401  {object} ErrorResponse
 // @Router       /auth/login [post]
-func (h *AuthHandler) Login(c *fiber.Ctx) error {
-var req LoginRequest
-if err := c.BodyParser(&req); err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "invalid JSON body"})
-}
-if req.Email == "" || req.Password == "" {
-return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "email and password are required"})
-}
+func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	var req LoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid JSON body"})
+		return
+	}
+	if req.Email == "" || req.Password == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "email and password are required"})
+		return
+	}
 
-user, err := h.userRepo.FindByEmail(c.Context(), req.Email)
-if err != nil {
-return c.Status(fiber.StatusUnauthorized).JSON(ErrorResponse{Error: "unauthorized", Message: "invalid email or password"})
-}
+	user, err := h.userRepo.FindByEmail(r.Context(), req.Email)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "invalid email or password"})
+		return
+	}
 
-if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
-return c.Status(fiber.StatusUnauthorized).JSON(ErrorResponse{Error: "unauthorized", Message: "invalid email or password"})
-}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "invalid email or password"})
+		return
+	}
 
-token, expiresAt, err := auth.GenerateToken(user.ID, user.Email, h.jwtSecret, h.jwtExpiryHours)
-if err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{Error: "internal_error", Message: "failed to generate token"})
-}
+	token, expiresAt, err := auth.GenerateToken(user.ID, user.Email, h.jwtSecret, h.jwtExpiryHours)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: "failed to generate token"})
+		return
+	}
 
-return c.JSON(TokenResponse{Token: token, ExpiresAt: expiresAt})
+	writeJSON(w, http.StatusOK, TokenResponse{Token: token, ExpiresAt: expiresAt})
 }
 
 // Me godoc
@@ -145,16 +164,18 @@ return c.JSON(TokenResponse{Token: token, ExpiresAt: expiresAt})
 // @Failure      401 {object} ErrorResponse
 // @Security     BearerAuth
 // @Router       /auth/me [get]
-func (h *AuthHandler) Me(c *fiber.Ctx) error {
-userID, ok := auth.GetUserID(c)
-if !ok {
-return c.Status(fiber.StatusUnauthorized).JSON(ErrorResponse{Error: "unauthorized", Message: "missing or invalid token"})
-}
+func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.GetUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing or invalid token"})
+		return
+	}
 
-user, err := h.userRepo.FindByID(c.Context(), userID)
-if err != nil {
-return c.Status(fiber.StatusUnauthorized).JSON(ErrorResponse{Error: "unauthorized", Message: "user not found"})
-}
+	user, err := h.userRepo.FindByID(r.Context(), userID)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "user not found"})
+		return
+	}
 
-return c.JSON(UserResponse{UserID: user.ID, Email: user.Email, CreatedAt: user.CreatedAt})
+	writeJSON(w, http.StatusOK, UserResponse{UserID: user.ID, Email: user.Email, CreatedAt: user.CreatedAt})
 }

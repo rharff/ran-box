@@ -1,11 +1,14 @@
 package handler
 
 import (
+	"context"
 	"mime"
+	"net/http"
 	"path/filepath"
 	"strconv"
+	"time"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/go-chi/chi/v5"
 
 	"github.com/naratel/naratel-box/backend/internal/auth"
 	"github.com/naratel/naratel-box/backend/internal/block"
@@ -43,30 +46,36 @@ func NewUploadHandler(fileRepo *repository.FileRepository, processor *block.Proc
 // @Produce      json
 // @Param        file formData file                  true "File to upload"
 // @Success      201  {object} UploadResponse
-// @Failure      400  {object} map[string]interface{} "bad_request"
-// @Failure      401  {object} map[string]interface{} "unauthorized"
-// @Failure      500  {object} map[string]interface{} "upload_failed"
+// @Failure      400  {object} ErrorResponse "bad_request"
+// @Failure      401  {object} ErrorResponse "unauthorized"
+// @Failure      500  {object} ErrorResponse "upload_failed"
 // @Security     BearerAuth
 // @Router       /files [post]
-func (h *UploadHandler) Upload(c *fiber.Ctx) error {
-	userID, ok := auth.GetUserID(c)
+func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.GetUserID(r)
 	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized"})
+		return
 	}
 
-	// Parse multipart form
-	fileHeader, err := c.FormFile("file")
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "bad_request",
-			"message": "field 'file' is required",
+	// Parse multipart form — 512 MB max memory; excess goes to temp files.
+	// net/http handles this natively without the issues Fiber/fasthttp had.
+	if err := r.ParseMultipartForm(512 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{
+			Error:   "bad_request",
+			Message: "failed to parse multipart form: " + err.Error(),
 		})
+		return
 	}
+	defer r.MultipartForm.RemoveAll()
 
-	// Open the uploaded file
-	f, err := fileHeader.Open()
+	f, fileHeader, err := r.FormFile("file")
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "cannot open file"})
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{
+			Error:   "bad_request",
+			Message: "field 'file' is required",
+		})
+		return
 	}
 	defer f.Close()
 
@@ -76,39 +85,46 @@ func (h *UploadHandler) Upload(c *fiber.Ctx) error {
 		mimeType = "application/octet-stream"
 	}
 
+	// Use a long-lived context for S3 uploads + DB operations.
+	ctx, ctxCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer ctxCancel()
+
 	// Process: split → hash → dedup → upload blocks
-	blockIDs, totalBytes, err := h.processor.Process(c.Context(), f)
+	blockIDs, totalBytes, err := h.processor.Process(ctx, f)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "upload_failed",
-			"message": err.Error(),
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
+			Error:   "upload_failed",
+			Message: err.Error(),
 		})
+		return
 	}
 
 	// Create file metadata record
-	file, err := h.fileRepo.Create(c.Context(), userID, fileHeader.Filename, mimeType, totalBytes)
+	file, err := h.fileRepo.Create(ctx, userID, fileHeader.Filename, mimeType, totalBytes)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "db_error",
-			"message": "failed to save file metadata",
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
+			Error:   "db_error",
+			Message: "failed to save file metadata",
 		})
+		return
 	}
 
 	// Link blocks to file
-	if err := h.fileRepo.LinkBlocks(c.Context(), file.ID, blockIDs); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":   "db_error",
-			"message": "failed to link blocks",
+	if err := h.fileRepo.LinkBlocks(ctx, file.ID, blockIDs); err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
+			Error:   "db_error",
+			Message: "failed to link blocks",
 		})
+		return
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"file_id":      file.ID,
-		"name":         file.Name,
-		"mime_type":    file.MimeType,
-		"size":         file.TotalSize,
-		"blocks_count": len(blockIDs),
-		"created_at":   file.CreatedAt,
+	writeJSON(w, http.StatusCreated, UploadResponse{
+		FileID:      file.ID,
+		Name:        file.Name,
+		MimeType:    file.MimeType,
+		Size:        file.TotalSize,
+		BlocksCount: len(blockIDs),
+		CreatedAt:   file.CreatedAt.Format(time.RFC3339),
 	})
 }
 
@@ -118,24 +134,26 @@ func (h *UploadHandler) Upload(c *fiber.Ctx) error {
 // @Tags         files
 // @Produce      json
 // @Success      200  {array}  model.File
-// @Failure      401  {object} map[string]interface{} "unauthorized"
-// @Failure      500  {object} map[string]interface{} "db_error"
+// @Failure      401  {object} ErrorResponse "unauthorized"
+// @Failure      500  {object} ErrorResponse "db_error"
 // @Security     BearerAuth
 // @Router       /files [get]
-func (h *UploadHandler) ListFiles(c *fiber.Ctx) error {
-	userID, ok := auth.GetUserID(c)
+func (h *UploadHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.GetUserID(r)
 	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized"})
+		return
 	}
 
-	files, err := h.fileRepo.ListByUserID(c.Context(), userID)
+	files, err := h.fileRepo.ListByUserID(r.Context(), userID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(ErrorResponse{Error: "db_error", Message: "failed to list files"})
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to list files"})
+		return
 	}
 	if files == nil {
 		files = []*model.File{}
 	}
-	return c.JSON(files)
+	writeJSON(w, http.StatusOK, files)
 }
 
 // FileInfo godoc
@@ -150,21 +168,24 @@ func (h *UploadHandler) ListFiles(c *fiber.Ctx) error {
 // @Failure      403 {object} ErrorResponse
 // @Security     BearerAuth
 // @Router       /files/{id}/info [get]
-func (h *UploadHandler) FileInfo(c *fiber.Ctx) error {
-	userID, ok := auth.GetUserID(c)
+func (h *UploadHandler) FileInfo(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.GetUserID(r)
 	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(ErrorResponse{Error: "unauthorized", Message: "missing token"})
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing token"})
+		return
 	}
 
-	fileID, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	fileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{Error: "bad_request", Message: "invalid file id"})
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid file id"})
+		return
 	}
 
-	file, err := h.fileRepo.FindByIDAndUserID(c.Context(), fileID, userID)
+	file, err := h.fileRepo.FindByIDAndUserID(r.Context(), fileID, userID)
 	if err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(ErrorResponse{Error: "forbidden", Message: "file not found or unauthorized"})
+		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: "forbidden", Message: "file not found or unauthorized"})
+		return
 	}
 
-	return c.JSON(file)
+	writeJSON(w, http.StatusOK, file)
 }

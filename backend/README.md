@@ -7,11 +7,11 @@ This document provides a technical overview of the backend system, which is a fi
 ## 1. Technical Stack
 
 * **Language**: Go (Golang)
-* **Web Framework**: Fiber (v2)
+* **Web Framework**: Chi (v5) with `net/http`
 * **Database**: PostgreSQL (using `pgx/v5` for connection pooling)
 * **Object Storage**: S3-Compatible Storage (e.g., QNAP, MinIO) via AWS SDK v2
 * **Authentication**: JWT (JSON Web Tokens)
-* **Documentation**: Swagger/OpenAPI
+* **Documentation**: Swagger/OpenAPI (via `swaggo/http-swagger`)
 
 ---
 

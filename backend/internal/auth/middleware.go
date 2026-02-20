@@ -1,50 +1,48 @@
 package auth
 
 import (
+	"context"
+	"net/http"
 	"strings"
-
-	"github.com/gofiber/fiber/v2"
 )
 
-const userIDKey = "user_id"
-const userEmailKey = "user_email"
+type contextKey string
 
-// Middleware returns a Fiber handler that validates JWT from the Authorization header.
-// On success, it injects user_id and user_email into ctx.Locals.
-func Middleware(jwtSecret string) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		header := c.Get("Authorization")
-		if header == "" {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error":   "unauthorized",
-				"message": "missing Authorization header",
-			})
-		}
+const userIDCtxKey contextKey = "user_id"
+const userEmailCtxKey contextKey = "user_email"
 
-		parts := strings.SplitN(header, " ", 2)
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error":   "unauthorized",
-				"message": "invalid Authorization format, expected: Bearer <token>",
-			})
-		}
+// Middleware returns an http.Handler middleware that validates JWT from the Authorization header.
+// On success it injects user_id and user_email into the request context.
+func Middleware(jwtSecret string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := r.Header.Get("Authorization")
+			if header == "" {
+				http.Error(w, `{"error":"unauthorized","message":"missing Authorization header"}`, http.StatusUnauthorized)
+				return
+			}
 
-		claims, err := ParseToken(parts[1], jwtSecret)
-		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error":   "unauthorized",
-				"message": err.Error(),
-			})
-		}
+			parts := strings.SplitN(header, " ", 2)
+			if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
+				http.Error(w, `{"error":"unauthorized","message":"invalid Authorization format, expected: Bearer <token>"}`, http.StatusUnauthorized)
+				return
+			}
 
-		c.Locals(userIDKey, claims.UserID)
-		c.Locals(userEmailKey, claims.Email)
-		return c.Next()
+			claims, err := ParseToken(parts[1], jwtSecret)
+			if err != nil {
+				http.Error(w, `{"error":"unauthorized","message":"`+err.Error()+`"}`, http.StatusUnauthorized)
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), userIDCtxKey, claims.UserID)
+			ctx = context.WithValue(ctx, userEmailCtxKey, claims.Email)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
 	}
 }
 
-// GetUserID extracts the authenticated user ID from Fiber context locals.
-func GetUserID(c *fiber.Ctx) (int64, bool) {
-	id, ok := c.Locals(userIDKey).(int64)
+// GetUserID extracts the authenticated user ID from the request context.
+func GetUserID(r *http.Request) (int64, bool) {
+	id, ok := r.Context().Value(userIDCtxKey).(int64)
 	return id, ok
 }

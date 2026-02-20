@@ -3,8 +3,7 @@ import { PUBLIC_API_BASE_URL } from '$env/static/public';
 import type { User, TokenResponse, NaratelFile, UploadResponse } from './types';
 
 export const api = axios.create({
-	baseURL: `${PUBLIC_API_BASE_URL}/api/v1`,
-	headers: { 'Content-Type': 'application/json' }
+	baseURL: `${PUBLIC_API_BASE_URL}/api/v1`
 });
 
 // Inject Bearer token from localStorage on every request
@@ -45,7 +44,7 @@ export async function uploadFile(
 	const form = new FormData();
 	form.append('file', file);
 	const res = await api.post<UploadResponse>('/files', form, {
-		headers: { 'Content-Type': 'multipart/form-data' },
+		headers: { 'Content-Type': undefined }, // let axios set multipart/form-data + boundary
 		onUploadProgress: (e) => {
 			if (onProgress && e.total) onProgress(Math.round((e.loaded * 100) / e.total));
 		}
