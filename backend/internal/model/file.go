@@ -6,6 +6,7 @@ import "time"
 type File struct {
 	ID        int64     `json:"id"`
 	UserID    int64     `json:"user_id"`
+	FolderID  *int64    `json:"folder_id"` // nil = root level
 	Name      string    `json:"name"`
 	MimeType  string    `json:"mime_type"`
 	TotalSize int64     `json:"total_size"`

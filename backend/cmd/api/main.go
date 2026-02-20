@@ -78,9 +78,11 @@ func main() {
 	log.Println("✅ S3 client ready")
 
 	// ── Repositories ──────────────────────────────────────────────────────────
-	userRepo  := repository.NewUserRepository(pool)
-	blockRepo := repository.NewBlockRepository(pool)
-	fileRepo  := repository.NewFileRepository(pool)
+	userRepo      := repository.NewUserRepository(pool)
+	blockRepo     := repository.NewBlockRepository(pool)
+	fileRepo      := repository.NewFileRepository(pool)
+	folderRepo    := repository.NewFolderRepository(pool)
+	shareLinkRepo := repository.NewShareLinkRepository(pool)
 
 	// ── Block Processor ───────────────────────────────────────────────────────
 	processor := block.NewProcessor(cfg.BlockSizeBytes(), blockRepo, s3Client)
@@ -89,6 +91,8 @@ func main() {
 	authHandler     := handler.NewAuthHandler(userRepo, cfg.JWTSecret, cfg.JWTExpiryHours)
 	uploadHandler   := handler.NewUploadHandler(fileRepo, processor)
 	downloadHandler := handler.NewDownloadHandler(fileRepo, blockRepo, s3Client)
+	folderHandler   := handler.NewFolderHandler(folderRepo, fileRepo)
+	shareHandler    := handler.NewShareHandler(shareLinkRepo, fileRepo, blockRepo, s3Client)
 
 	// ── Chi Router ────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -98,7 +102,7 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Origin", "Content-Type", "Accept", "Authorization"},
 		AllowCredentials: false,
 		MaxAge:           300,
@@ -109,6 +113,9 @@ func main() {
 		// Public auth
 		api.Post("/auth/register", authHandler.Register)
 		api.Post("/auth/login", authHandler.Login)
+
+		// Public share link download
+		api.Get("/share/{token}", shareHandler.DownloadShared)
 
 		// Protected auth
 		api.With(auth.Middleware(cfg.JWTSecret)).Get("/auth/me", authHandler.Me)
@@ -121,6 +128,25 @@ func main() {
 			files.Get("/files/{id}/info", uploadHandler.FileInfo)
 			files.Get("/files/{id}", downloadHandler.Download)
 			files.Delete("/files/{id}", downloadHandler.DeleteFile)
+			files.Patch("/files/{id}/rename", uploadHandler.RenameFile)
+			files.Patch("/files/{id}/move", uploadHandler.MoveFile)
+
+			// Share links
+			files.Post("/files/{id}/share", shareHandler.CreateShareLink)
+			files.Get("/files/{id}/share", shareHandler.GetShareLinks)
+			files.Delete("/share/{linkId}", shareHandler.DeleteShareLink)
+		})
+
+		// Protected folder routes
+		api.Group(func(folders chi.Router) {
+			folders.Use(auth.Middleware(cfg.JWTSecret))
+			folders.Post("/folders", folderHandler.CreateFolder)
+			folders.Get("/folders/contents", folderHandler.ListFolderContents)
+			folders.Get("/folders/all", folderHandler.ListAllFolders)
+			folders.Get("/folders/{id}/breadcrumb", folderHandler.Breadcrumb)
+			folders.Patch("/folders/{id}/rename", folderHandler.RenameFolder)
+			folders.Patch("/folders/{id}/move", folderHandler.MoveFolder)
+			folders.Delete("/folders/{id}", folderHandler.DeleteFolder)
 		})
 	})
 

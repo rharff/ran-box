@@ -16,11 +16,17 @@
 	const DISPLAY_CAP = 15 * 1024 * 1024 * 1024;
 	let usedPct = $derived(Math.min((fileStore.totalSize / DISPLAY_CAP) * 100, 100));
 
-	// Desktop sidebar: starts open. Mobile drawer: starts closed.
 	let sidebarOpen = $state(true);
 	let mobileDrawerOpen = $state(false);
 
 	function closeMobileDrawer() { mobileDrawerOpen = false; }
+
+	let searchTimeout: ReturnType<typeof setTimeout>;
+	function handleSearch(e: Event) {
+		const value = (e.target as HTMLInputElement).value;
+		clearTimeout(searchTimeout);
+		searchTimeout = setTimeout(() => fileStore.setSearch(value), 300);
+	}
 </script>
 
 <!-- Hidden upload input shared across triggers -->
@@ -45,13 +51,11 @@
 		></div>
 	{/if}
 
-	<!-- ── Sidebar (desktop: permanent; mobile: overlay drawer) ── -->
+	<!-- ── Sidebar ── -->
 	<aside class={[
 		'flex flex-col border-r bg-card z-40 transition-all duration-200',
-		// Desktop: inline, collapsible width
 		'md:relative md:translate-x-0',
 		sidebarOpen ? 'md:w-60' : 'md:w-16',
-		// Mobile: fixed full-height drawer
 		'fixed inset-y-0 left-0 w-72',
 		mobileDrawerOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full md:translate-x-0'
 	].join(' ')}>
@@ -60,7 +64,6 @@
 		<div class="flex h-16 items-center gap-2 px-4 border-b flex-shrink-0">
 			<span class="text-2xl flex-shrink-0">📦</span>
 			<span class={`font-bold text-base tracking-tight ${sidebarOpen ? 'md:block' : 'md:hidden'} block`}>Naratel Box</span>
-			<!-- Close button — mobile only -->
 			<button onclick={closeMobileDrawer} aria-label="Close menu"
 				class="ml-auto rounded-md p-1.5 hover:bg-accent md:hidden">
 				<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -82,16 +85,16 @@
 
 		<!-- Nav -->
 		<nav class="flex-1 px-2 space-y-1">
-			<a href="/dashboard" onclick={closeMobileDrawer}
-				class="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium bg-accent text-accent-foreground">
+			<button onclick={() => { fileStore.navigateToFolder(null); closeMobileDrawer(); }}
+				class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium bg-accent text-accent-foreground">
 				<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
 				</svg>
 				<span class={sidebarOpen ? 'md:inline' : 'md:hidden'}>My Files</span>
-			</a>
+			</button>
 		</nav>
 
-		<!-- Storage bar — only when expanded -->
+		<!-- Storage bar -->
 		<div class={`border-t px-4 py-4 ${sidebarOpen ? 'md:block' : 'md:hidden'} block`}>
 			<p class="text-xs font-medium text-muted-foreground mb-2">Storage used</p>
 			<div class="h-1.5 w-full rounded-full bg-muted overflow-hidden">
@@ -124,7 +127,6 @@
 	<div class="flex flex-1 flex-col overflow-hidden">
 		<!-- Top bar -->
 		<header class="flex h-14 items-center gap-2 border-b bg-card px-4 flex-shrink-0 md:h-16 md:px-6 md:gap-3">
-			<!-- Hamburger: opens mobile drawer OR collapses desktop sidebar -->
 			<button
 				onclick={() => { if (window.innerWidth < 768) mobileDrawerOpen = true; else sidebarOpen = !sidebarOpen; }}
 				class="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground flex-shrink-0"
@@ -142,12 +144,11 @@
 				</svg>
 				<input type="search" placeholder="Search files…"
 					class="w-full rounded-full border bg-muted/40 py-2 pl-10 pr-4 text-sm outline-none focus:ring-2 focus:ring-ring transition-all"
-					value={fileStore.searchQuery}
-					oninput={(e) => fileStore.setSearch((e.target as HTMLInputElement).value)}
+					oninput={handleSearch}
 				/>
 			</div>
 
-			<!-- Mobile: upload icon button in top bar -->
+			<!-- Mobile upload button -->
 			<button
 				onclick={() => document.getElementById('sidebar-upload')?.click()}
 				class="flex-shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground md:hidden"

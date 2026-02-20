@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"mime"
 	"net/http"
 	"path/filepath"
@@ -40,15 +41,16 @@ func NewUploadHandler(fileRepo *repository.FileRepository, processor *block.Proc
 
 // Upload godoc
 // @Summary      Upload a file
-// @Description  Upload a file using multipart/form-data. The backend splits it into 8MB blocks, deduplicates, and stores in S3.
+// @Description  Upload a file using multipart/form-data. Optionally specify folder_id form field.
 // @Tags         files
 // @Accept       mpfd
 // @Produce      json
-// @Param        file formData file                  true "File to upload"
+// @Param        file      formData file   true  "File to upload"
+// @Param        folder_id formData int    false "Target folder ID"
 // @Success      201  {object} UploadResponse
-// @Failure      400  {object} ErrorResponse "bad_request"
-// @Failure      401  {object} ErrorResponse "unauthorized"
-// @Failure      500  {object} ErrorResponse "upload_failed"
+// @Failure      400  {object} ErrorResponse
+// @Failure      401  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
 // @Security     BearerAuth
 // @Router       /files [post]
 func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
@@ -58,8 +60,6 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse multipart form — 512 MB max memory; excess goes to temp files.
-	// net/http handles this natively without the issues Fiber/fasthttp had.
 	if err := r.ParseMultipartForm(512 << 20); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{
 			Error:   "bad_request",
@@ -79,17 +79,25 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	// Detect MIME type from extension (fallback to octet-stream)
+	// Parse optional folder_id
+	var folderID *int64
+	if fid := r.FormValue("folder_id"); fid != "" {
+		parsed, err := strconv.ParseInt(fid, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid folder_id"})
+			return
+		}
+		folderID = &parsed
+	}
+
 	mimeType := mime.TypeByExtension(filepath.Ext(fileHeader.Filename))
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
 
-	// Use a long-lived context for S3 uploads + DB operations.
 	ctx, ctxCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer ctxCancel()
 
-	// Process: split → hash → dedup → upload blocks
 	blockIDs, totalBytes, err := h.processor.Process(ctx, f)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
@@ -99,8 +107,7 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create file metadata record
-	file, err := h.fileRepo.Create(ctx, userID, fileHeader.Filename, mimeType, totalBytes)
+	file, err := h.fileRepo.Create(ctx, userID, fileHeader.Filename, mimeType, totalBytes, folderID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
 			Error:   "db_error",
@@ -109,7 +116,6 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Link blocks to file
 	if err := h.fileRepo.LinkBlocks(ctx, file.ID, blockIDs); err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
 			Error:   "db_error",
@@ -130,12 +136,14 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 // ListFiles godoc
 // @Summary      List files
-// @Description  Returns all files owned by the authenticated user
+// @Description  Returns files in a folder (or root). Use ?folder_id=N or omit for root. Use ?search=term to search.
 // @Tags         files
 // @Produce      json
-// @Success      200  {array}  model.File
-// @Failure      401  {object} ErrorResponse "unauthorized"
-// @Failure      500  {object} ErrorResponse "db_error"
+// @Param        folder_id query int    false "Folder ID (omit for root)"
+// @Param        search    query string false "Search query"
+// @Success      200  {object} FolderContentsResponse
+// @Failure      401  {object} ErrorResponse
+// @Failure      500  {object} ErrorResponse
 // @Security     BearerAuth
 // @Router       /files [get]
 func (h *UploadHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +153,35 @@ func (h *UploadHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	files, err := h.fileRepo.ListByUserID(r.Context(), userID)
+	// Search mode
+	if q := r.URL.Query().Get("search"); q != "" {
+		files, err := h.fileRepo.Search(r.Context(), userID, q)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "search failed"})
+			return
+		}
+		if files == nil {
+			files = []*model.File{}
+		}
+		writeJSON(w, http.StatusOK, FolderContentsResponse{
+			Files:   files,
+			Folders: []*model.Folder{},
+		})
+		return
+	}
+
+	// Folder listing mode
+	var folderID *int64
+	if fid := r.URL.Query().Get("folder_id"); fid != "" {
+		parsed, err := strconv.ParseInt(fid, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid folder_id"})
+			return
+		}
+		folderID = &parsed
+	}
+
+	files, err := h.fileRepo.ListByFolder(r.Context(), userID, folderID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to list files"})
 		return
@@ -153,12 +189,13 @@ func (h *UploadHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	if files == nil {
 		files = []*model.File{}
 	}
+
 	writeJSON(w, http.StatusOK, files)
 }
 
 // FileInfo godoc
 // @Summary      Get file metadata
-// @Description  Returns metadata for a single file without downloading it
+// @Description  Returns metadata for a single file
 // @Tags         files
 // @Produce      json
 // @Param        id  path     int true "File ID"
@@ -188,4 +225,96 @@ func (h *UploadHandler) FileInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, file)
+}
+
+// RenameRequest is the payload for PATCH /files/{id}/rename.
+type RenameRequest struct {
+	Name string `json:"name"`
+}
+
+// RenameFile godoc
+// @Summary      Rename a file
+// @Tags         files
+// @Accept       json
+// @Produce      json
+// @Param        id   path     int           true "File ID"
+// @Param        body body     RenameRequest true "New name"
+// @Success      200  {object} model.File
+// @Security     BearerAuth
+// @Router       /files/{id}/rename [patch]
+func (h *UploadHandler) RenameFile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.GetUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized"})
+		return
+	}
+
+	fileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid file id"})
+		return
+	}
+
+	var req RenameRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "name is required"})
+		return
+	}
+
+	file, err := h.fileRepo.Rename(r.Context(), fileID, userID, req.Name)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "not_found", Message: "file not found"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, file)
+}
+
+// MoveRequest is the payload for PATCH /files/{id}/move.
+type MoveRequest struct {
+	FolderID *int64 `json:"folder_id"` // null = move to root
+}
+
+// MoveFile godoc
+// @Summary      Move a file to a different folder
+// @Tags         files
+// @Accept       json
+// @Produce      json
+// @Param        id   path     int         true "File ID"
+// @Param        body body     MoveRequest true "Target folder"
+// @Success      200  {object} model.File
+// @Security     BearerAuth
+// @Router       /files/{id}/move [patch]
+func (h *UploadHandler) MoveFile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.GetUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized"})
+		return
+	}
+
+	fileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid file id"})
+		return
+	}
+
+	var req MoveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid JSON body"})
+		return
+	}
+
+	file, err := h.fileRepo.Move(r.Context(), fileID, userID, req.FolderID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "not_found", Message: "file not found"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, file)
+}
+
+// FolderContentsResponse wraps files and subfolders for a directory listing.
+type FolderContentsResponse struct {
+	Folders []*model.Folder `json:"folders"`
+	Files   []*model.File   `json:"files"`
 }

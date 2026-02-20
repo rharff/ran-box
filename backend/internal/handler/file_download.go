@@ -83,8 +83,15 @@ func (h *DownloadHandler) Download(w http.ResponseWriter, r *http.Request) {
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
-	w.Header().Set("Content-Type", mimeType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, file.Name))
+
+	// Support preview mode (inline display for images, PDFs, text)
+	if r.URL.Query().Get("preview") == "true" {
+		w.Header().Set("Content-Type", mimeType)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, file.Name))
+	} else {
+		w.Header().Set("Content-Type", mimeType)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, file.Name))
+	}
 	w.Header().Set("Content-Length", strconv.FormatInt(file.TotalSize, 10))
 
 	// Stream blocks directly to response writer

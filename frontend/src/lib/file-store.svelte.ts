@@ -1,54 +1,119 @@
-import { listFiles, uploadFile, deleteFile, downloadFile } from './api';
-import type { NaratelFile } from './types';
+import {
+	listFolderContents,
+	uploadFile,
+	deleteFile,
+	downloadFile,
+	renameFile,
+	moveFile,
+	createFolder,
+	renameFolder as apiFolderRename,
+	moveFolder as apiFolderMove,
+	deleteFolder as apiFolderDelete,
+	getBreadcrumb,
+	listFiles
+} from './api';
+import type { NaratelFile, Folder } from './types';
 
 // ── Reactive file store using Svelte 5 runes ─────────────────────────────────
 
 let files = $state<NaratelFile[]>([]);
+let folders = $state<Folder[]>([]);
+let breadcrumb = $state<Folder[]>([]);
+let currentFolderId = $state<number | null>(null);
 let loading = $state(false);
 let error = $state('');
 
 // Upload state
 let uploading = $state(false);
 let uploadProgress = $state(0);
-let uploadQueue = $state<string[]>([]);   // filenames in progress
+let uploadQueue = $state<string[]>([]);
 let uploadErrors = $state<string[]>([]);
 
 // Selection
-let selectedIds = $state<Set<number>>(new Set());
+let selectedFileIds = $state<Set<number>>(new Set());
+let selectedFolderIds = $state<Set<number>>(new Set());
 
 // Search
 let searchQuery = $state('');
+let searchResults = $state<NaratelFile[]>([]);
+let isSearching = $state(false);
 
 export const fileStore = {
 	get files() { return files; },
+	get folders() { return folders; },
+	get breadcrumb() { return breadcrumb; },
+	get currentFolderId() { return currentFolderId; },
 	get loading() { return loading; },
 	get error() { return error; },
 	get uploading() { return uploading; },
 	get uploadProgress() { return uploadProgress; },
 	get uploadQueue() { return uploadQueue; },
 	get uploadErrors() { return uploadErrors; },
-	get selectedIds() { return selectedIds; },
+	get selectedFileIds() { return selectedFileIds; },
+	get selectedFolderIds() { return selectedFolderIds; },
 	get searchQuery() { return searchQuery; },
+	get searchResults() { return searchResults; },
+	get isSearching() { return isSearching; },
 
-	get filteredFiles(): NaratelFile[] {
-		if (!searchQuery.trim()) return files;
-		const q = searchQuery.toLowerCase();
-		return files.filter((f) => f.name.toLowerCase().includes(q));
+	get displayFiles(): NaratelFile[] {
+		if (isSearching && searchQuery.trim()) return searchResults;
+		return files;
+	},
+
+	get displayFolders(): Folder[] {
+		if (isSearching && searchQuery.trim()) return [];
+		return folders;
 	},
 
 	get totalSize(): number {
 		return files.reduce((acc, f) => acc + f.total_size, 0);
 	},
 
-	async load() {
+	get hasSelection(): boolean {
+		return selectedFileIds.size > 0 || selectedFolderIds.size > 0;
+	},
+
+	get selectionCount(): number {
+		return selectedFileIds.size + selectedFolderIds.size;
+	},
+
+	async loadFolder(folderId: number | null = null) {
 		loading = true;
 		error = '';
+		currentFolderId = folderId;
+		isSearching = false;
+		searchQuery = '';
+
 		try {
-			files = await listFiles();
+			const contents = await listFolderContents(folderId);
+			folders = contents.folders ?? [];
+			files = contents.files ?? [];
+
+			// Load breadcrumb
+			if (folderId != null) {
+				breadcrumb = await getBreadcrumb(folderId);
+			} else {
+				breadcrumb = [];
+			}
 		} catch {
-			error = 'Failed to load files. Please refresh.';
+			error = 'Failed to load folder contents. Please refresh.';
 		} finally {
 			loading = false;
+		}
+	},
+
+	async search(query: string) {
+		searchQuery = query;
+		if (!query.trim()) {
+			isSearching = false;
+			searchResults = [];
+			return;
+		}
+		isSearching = true;
+		try {
+			searchResults = await listFiles(undefined, query);
+		} catch {
+			searchResults = [];
 		}
 	},
 
@@ -63,7 +128,7 @@ export const fileStore = {
 			uploadQueue = items.slice(i).map((f) => f.name);
 			uploadProgress = 0;
 			try {
-				await uploadFile(file, (pct) => { uploadProgress = pct; });
+				await uploadFile(file, currentFolderId, (pct) => { uploadProgress = pct; });
 			} catch (err: any) {
 				const msg = err?.response?.data?.message ?? `Failed to upload "${file.name}"`;
 				uploadErrors = [...uploadErrors, msg];
@@ -73,45 +138,106 @@ export const fileStore = {
 		uploading = false;
 		uploadQueue = [];
 		uploadProgress = 0;
-		await fileStore.load();
+		await fileStore.loadFolder(currentFolderId);
 	},
 
-	async delete(id: number) {
+	// ── File operations ───────────────────────────────────────────────────
+
+	async deleteFileItem(id: number) {
 		await deleteFile(id);
 		files = files.filter((f) => f.id !== id);
-		selectedIds.delete(id);
-		selectedIds = new Set(selectedIds);
+		selectedFileIds.delete(id);
+		selectedFileIds = new Set(selectedFileIds);
 	},
 
 	async download(id: number, name: string) {
 		await downloadFile(id, name);
 	},
 
-	toggleSelect(id: number) {
-		if (selectedIds.has(id)) {
-			selectedIds.delete(id);
+	async renameFileItem(id: number, newName: string) {
+		const updated = await renameFile(id, newName);
+		files = files.map((f) => (f.id === id ? updated : f));
+	},
+
+	async moveFileItem(id: number, folderId: number | null) {
+		await moveFile(id, folderId);
+		// Reload current folder
+		await fileStore.loadFolder(currentFolderId);
+	},
+
+	// ── Folder operations ─────────────────────────────────────────────────
+
+	async createFolder(name: string) {
+		await createFolder(name, currentFolderId);
+		await fileStore.loadFolder(currentFolderId);
+	},
+
+	async renameFolderItem(id: number, newName: string) {
+		const updated = await apiFolderRename(id, newName);
+		folders = folders.map((f) => (f.id === id ? updated : f));
+	},
+
+	async moveFolderItem(id: number, parentId: number | null) {
+		await apiFolderMove(id, parentId);
+		await fileStore.loadFolder(currentFolderId);
+	},
+
+	async deleteFolderItem(id: number) {
+		await apiFolderDelete(id);
+		folders = folders.filter((f) => f.id !== id);
+		selectedFolderIds.delete(id);
+		selectedFolderIds = new Set(selectedFolderIds);
+	},
+
+	navigateToFolder(folderId: number | null) {
+		fileStore.clearSelection();
+		fileStore.loadFolder(folderId);
+	},
+
+	// ── Selection ─────────────────────────────────────────────────────────
+
+	toggleFileSelect(id: number) {
+		if (selectedFileIds.has(id)) {
+			selectedFileIds.delete(id);
 		} else {
-			selectedIds.add(id);
+			selectedFileIds.add(id);
 		}
-		selectedIds = new Set(selectedIds);
+		selectedFileIds = new Set(selectedFileIds);
+	},
+
+	toggleFolderSelect(id: number) {
+		if (selectedFolderIds.has(id)) {
+			selectedFolderIds.delete(id);
+		} else {
+			selectedFolderIds.add(id);
+		}
+		selectedFolderIds = new Set(selectedFolderIds);
 	},
 
 	selectAll() {
-		selectedIds = new Set(fileStore.filteredFiles.map((f) => f.id));
+		selectedFileIds = new Set(files.map((f) => f.id));
+		selectedFolderIds = new Set(folders.map((f) => f.id));
 	},
 
 	clearSelection() {
-		selectedIds = new Set();
+		selectedFileIds = new Set();
+		selectedFolderIds = new Set();
 	},
 
 	async deleteSelected() {
-		const ids = Array.from(selectedIds);
-		await Promise.all(ids.map((id) => deleteFile(id)));
-		files = files.filter((f) => !ids.includes(f.id));
-		selectedIds = new Set();
+		const fileIds = Array.from(selectedFileIds);
+		const folderIds = Array.from(selectedFolderIds);
+		await Promise.all([
+			...fileIds.map((id) => deleteFile(id)),
+			...folderIds.map((id) => apiFolderDelete(id))
+		]);
+		files = files.filter((f) => !fileIds.includes(f.id));
+		folders = folders.filter((f) => !folderIds.includes(f.id));
+		selectedFileIds = new Set();
+		selectedFolderIds = new Set();
 	},
 
 	setSearch(q: string) {
-		searchQuery = q;
+		fileStore.search(q);
 	}
 };
