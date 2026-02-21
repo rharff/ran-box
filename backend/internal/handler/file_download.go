@@ -9,6 +9,7 @@ import (
 
 	"github.com/naratel/naratel-box/backend/internal/auth"
 	"github.com/naratel/naratel-box/backend/internal/block"
+	"github.com/naratel/naratel-box/backend/internal/logger"
 	"github.com/naratel/naratel-box/backend/internal/repository"
 	"github.com/naratel/naratel-box/backend/internal/storage"
 )
@@ -47,6 +48,7 @@ func NewDownloadHandler(
 func (h *DownloadHandler) Download(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.GetUserID(r)
 	if !ok {
+		logger.Warn(r.Context(), "Unauthorized download attempt", nil)
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing token"})
 		return
 	}
@@ -57,9 +59,16 @@ func (h *DownloadHandler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	logger.Info(r.Context(), "File download initiated", map[string]interface{}{
+		"user_id": userID, "file_id": fileID,
+	})
+
 	// ── AUTHORIZATION CHECK ──
 	file, err := h.fileRepo.FindByIDAndUserID(r.Context(), fileID, userID)
 	if err != nil {
+		logger.Warn(r.Context(), "Download forbidden - file not found or unauthorized", map[string]interface{}{
+			"user_id": userID, "file_id": fileID,
+		})
 		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: "forbidden", Message: "you do not have access to this file"})
 		return
 	}
@@ -67,6 +76,9 @@ func (h *DownloadHandler) Download(w http.ResponseWriter, r *http.Request) {
 	// Fetch ordered block IDs for this file
 	blockIDs, err := h.fileRepo.GetBlockIDs(r.Context(), file.ID)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Failed to fetch block IDs for download", logger.ErrorDetails{
+			Code: "DB_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to fetch block ids"})
 		return
 	}
@@ -74,6 +86,9 @@ func (h *DownloadHandler) Download(w http.ResponseWriter, r *http.Request) {
 	// Fetch block metadata (S3 keys)
 	blocks, err := h.blockRepo.FindByIDs(r.Context(), blockIDs)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Failed to fetch block metadata for download", logger.ErrorDetails{
+			Code: "DB_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to fetch blocks"})
 		return
 	}
@@ -96,9 +111,20 @@ func (h *DownloadHandler) Download(w http.ResponseWriter, r *http.Request) {
 
 	// Stream blocks directly to response writer
 	if err := block.BlocksToStream(r.Context(), blocks, h.s3, w); err != nil {
-		// Headers already sent; log the error but can't change status
+		logger.ErrorLog(r.Context(), "File download streaming failed", logger.ErrorDetails{
+			Code: "S3_STREAM_ERR", Details: err.Error(),
+		})
+		// Headers already sent; can't change status
 		return
 	}
+
+	logger.Info(r.Context(), "File downloaded successfully", map[string]interface{}{
+		"user_id":    userID,
+		"file_id":    file.ID,
+		"file_name":  file.Name,
+		"total_size": file.TotalSize,
+		"blocks":     len(blocks),
+	})
 }
 
 // DeleteFile godoc
@@ -117,6 +143,7 @@ func (h *DownloadHandler) Download(w http.ResponseWriter, r *http.Request) {
 func (h *DownloadHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.GetUserID(r)
 	if !ok {
+		logger.Warn(r.Context(), "Unauthorized delete attempt", nil)
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing token"})
 		return
 	}
@@ -127,15 +154,25 @@ func (h *DownloadHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	logger.Info(r.Context(), "File deletion initiated", map[string]interface{}{
+		"user_id": userID, "file_id": fileID,
+	})
+
 	// Fetch block IDs before deleting the file (cascade would remove file_blocks)
 	blockIDs, err := h.fileRepo.GetBlockIDs(r.Context(), fileID)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Failed to fetch block IDs for deletion", logger.ErrorDetails{
+			Code: "DB_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to fetch block ids"})
 		return
 	}
 
 	// Delete file record (also cascades file_blocks)
 	if err := h.fileRepo.Delete(r.Context(), fileID, userID); err != nil {
+		logger.Warn(r.Context(), "File deletion failed - not found or unauthorized", map[string]interface{}{
+			"user_id": userID, "file_id": fileID, "error": err.Error(),
+		})
 		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: "forbidden", Message: "file not found or unauthorized"})
 		return
 	}
@@ -146,14 +183,31 @@ func (h *DownloadHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		for _, b := range blocks {
 			newCount, err := h.blockRepo.DecrementRefCount(r.Context(), b.ID)
 			if err != nil {
-				continue // log in production
+				logger.ErrorLog(r.Context(), "Failed to decrement block ref count", logger.ErrorDetails{
+					Code: "BLOCK_DEREF_ERR", Details: fmt.Sprintf("block_id=%d: %s", b.ID, err.Error()),
+				})
+				continue
 			}
 			if newCount <= 0 {
-				_ = h.s3.DeleteObject(r.Context(), b.S3Key)
-				_ = h.blockRepo.Delete(r.Context(), b.ID)
+				if err := h.s3.DeleteObject(r.Context(), b.S3Key); err != nil {
+					logger.ErrorLog(r.Context(), "Failed to delete orphaned block from S3", logger.ErrorDetails{
+						Code: "S3_DELETE_ERR", Details: fmt.Sprintf("s3_key=%s: %s", b.S3Key, err.Error()),
+					})
+				}
+				if err := h.blockRepo.Delete(r.Context(), b.ID); err != nil {
+					logger.ErrorLog(r.Context(), "Failed to delete orphaned block from DB", logger.ErrorDetails{
+						Code: "DB_DELETE_ERR", Details: fmt.Sprintf("block_id=%d: %s", b.ID, err.Error()),
+					})
+				}
+				logger.Info(r.Context(), "Orphaned block garbage collected", map[string]interface{}{
+					"block_id": b.ID, "s3_key": b.S3Key,
+				})
 			}
 		}
 	}
 
+	logger.Info(r.Context(), "File deleted successfully", map[string]interface{}{
+		"user_id": userID, "file_id": fileID, "blocks_processed": len(blockIDs),
+	})
 	w.WriteHeader(http.StatusNoContent)
 }

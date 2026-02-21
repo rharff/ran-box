@@ -12,6 +12,7 @@ import (
 
 	"github.com/naratel/naratel-box/backend/internal/auth"
 	"github.com/naratel/naratel-box/backend/internal/block"
+	"github.com/naratel/naratel-box/backend/internal/logger"
 	"github.com/naratel/naratel-box/backend/internal/repository"
 	"github.com/naratel/naratel-box/backend/internal/storage"
 )
@@ -71,6 +72,9 @@ func (h *ShareHandler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
 	// Verify ownership
 	_, err = h.fileRepo.FindByIDAndUserID(r.Context(), fileID, userID)
 	if err != nil {
+		logger.Warn(r.Context(), "Share link creation forbidden", map[string]interface{}{
+			"user_id": userID, "file_id": fileID,
+		})
 		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: "forbidden", Message: "file not found or unauthorized"})
 		return
 	}
@@ -78,6 +82,9 @@ func (h *ShareHandler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
 	// Generate a random token
 	tokenBytes := make([]byte, 24)
 	if _, err := rand.Read(tokenBytes); err != nil {
+		logger.ErrorLog(r.Context(), "Failed to generate share token", logger.ErrorDetails{
+			Code: "CRYPTO_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: "failed to generate token"})
 		return
 	}
@@ -88,9 +95,16 @@ func (h *ShareHandler) CreateShareLink(w http.ResponseWriter, r *http.Request) {
 
 	link, err := h.shareRepo.Create(r.Context(), fileID, userID, token, &expiresAt)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Failed to create share link", logger.ErrorDetails{
+			Code: "DB_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to create share link"})
 		return
 	}
+
+	logger.Info(r.Context(), "Share link created successfully", map[string]interface{}{
+		"user_id": userID, "file_id": fileID, "link_id": link.ID, "expires_at": expiresAt.Format(time.RFC3339),
+	})
 
 	writeJSON(w, http.StatusCreated, ShareLinkResponse{
 		ID:        link.ID,
@@ -184,14 +198,22 @@ func (h *ShareHandler) DeleteShareLink(w http.ResponseWriter, r *http.Request) {
 func (h *ShareHandler) DownloadShared(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
 
+	logger.Info(r.Context(), "Public share download initiated", map[string]interface{}{
+		"token": token,
+	})
+
 	link, err := h.shareRepo.FindByToken(r.Context(), token)
 	if err != nil || link == nil {
+		logger.Warn(r.Context(), "Share link not found", map[string]interface{}{"token": token})
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "not_found", Message: "share link not found"})
 		return
 	}
 
 	// Check expiry
 	if link.ExpiresAt != nil && time.Now().After(*link.ExpiresAt) {
+		logger.Warn(r.Context(), "Expired share link accessed", map[string]interface{}{
+			"token": token, "link_id": link.ID, "expired_at": link.ExpiresAt.Format(time.RFC3339),
+		})
 		writeJSON(w, http.StatusGone, ErrorResponse{Error: "expired", Message: "share link has expired"})
 		return
 	}
@@ -199,18 +221,27 @@ func (h *ShareHandler) DownloadShared(w http.ResponseWriter, r *http.Request) {
 	// Fetch file (no user check — public share)
 	file, err := h.fileRepo.FindByID(r.Context(), link.FileID)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Shared file not found", logger.ErrorDetails{
+			Code: "FILE_NOT_FOUND", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "not_found", Message: "file not found"})
 		return
 	}
 
 	blockIDs, err := h.fileRepo.GetBlockIDs(r.Context(), file.ID)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Failed to fetch block IDs for shared download", logger.ErrorDetails{
+			Code: "DB_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to fetch block ids"})
 		return
 	}
 
 	blocks, err := h.blockRepo.FindByIDs(r.Context(), blockIDs)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Failed to fetch blocks for shared download", logger.ErrorDetails{
+			Code: "DB_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to fetch blocks"})
 		return
 	}
@@ -231,6 +262,13 @@ func (h *ShareHandler) DownloadShared(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(file.TotalSize, 10))
 
 	if err := block.BlocksToStream(r.Context(), blocks, h.s3, w); err != nil {
+		logger.ErrorLog(r.Context(), "Shared file streaming failed", logger.ErrorDetails{
+			Code: "S3_STREAM_ERR", Details: err.Error(),
+		})
 		return
 	}
+
+	logger.Info(r.Context(), "Shared file downloaded successfully", map[string]interface{}{
+		"token": token, "file_id": file.ID, "file_name": file.Name, "total_size": file.TotalSize,
+	})
 }

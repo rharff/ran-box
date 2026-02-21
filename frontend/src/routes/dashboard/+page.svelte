@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { page } from '$app/stores';
 	import { fileStore } from '$lib/file-store.svelte';
 	import { formatBytes, formatDate, formatDateFull, mimeIcon, mimeColor, mimeLabel } from '$lib/utils/format';
 	import { getFilePreviewBlob, createShareLink, getShareLinks, deleteShareLink, shareDownloadUrl, listAllFolders } from '$lib/api';
@@ -11,8 +12,15 @@
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Progress } from '$lib/components/ui/progress';
 
-	// ── Load on mount ─────────────────────────────────────────────────────────
-	$effect(() => { fileStore.loadFolder(null); });
+	// ── Load folder from URL (reacts to browser back/forward) ─────────────
+	let urlFolderId = $derived.by(() => {
+		const param = $page.url.searchParams.get('folder');
+		return param ? Number(param) : null;
+	});
+
+	$effect(() => {
+		fileStore.loadFolder(urlFolderId);
+	});
 
 	// ── View / Sort state ────────────────────────────────────────────────────
 	let viewMode = $state<ViewMode>('grid');
@@ -42,6 +50,70 @@
 	let allFolders = $state<Folder[]>([]);
 	let moveDestination = $state<number | null>(null);
 	let moving = $state(false);
+	let expandedFolders = $state<Set<number | null>>(new Set([null]));
+	let loadingFolders = $state(false);
+
+	interface FolderNode {
+		id: number | null;
+		name: string;
+		children: FolderNode[];
+		depth: number;
+	}
+
+	let folderTree = $derived.by(() => {
+		const excludeId = moveTarget?.type === 'folder' ? moveTarget.item.id : -1;
+		const folders = allFolders.filter(f => f.id !== excludeId);
+
+		// Collect all descendants of excluded folder so we don't show them
+		const excludeIds = new Set<number>();
+		if (excludeId !== -1) {
+			excludeIds.add(excludeId);
+			let changed = true;
+			while (changed) {
+				changed = false;
+				for (const f of allFolders) {
+					if (!excludeIds.has(f.id) && f.parent_id !== null && excludeIds.has(f.parent_id)) {
+						excludeIds.add(f.id);
+						changed = true;
+					}
+				}
+			}
+		}
+		const validFolders = allFolders.filter(f => !excludeIds.has(f.id));
+
+		function buildChildren(parentId: number | null, depth: number): FolderNode[] {
+			return validFolders
+				.filter(f => f.parent_id === parentId)
+				.sort((a, b) => a.name.localeCompare(b.name))
+				.map(f => ({
+					id: f.id,
+					name: f.name,
+					children: buildChildren(f.id, depth + 1),
+					depth,
+				}));
+		}
+
+		return { id: null as number | null, name: 'All Files', children: buildChildren(null, 1), depth: 0 } as FolderNode;
+	});
+
+	function toggleExpand(id: number | null) {
+		const next = new Set(expandedFolders);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		expandedFolders = next;
+	}
+
+	function flattenTree(node: FolderNode): FolderNode[] {
+		const result: FolderNode[] = [node];
+		if (expandedFolders.has(node.id)) {
+			for (const child of node.children) {
+				result.push(...flattenTree(child));
+			}
+		}
+		return result;
+	}
+
+	let flatFolderList = $derived(flattenTree(folderTree));
 
 	// ── Preview dialog ───────────────────────────────────────────────────────
 	let previewFile = $state<NaratelFile | null>(null);
@@ -78,6 +150,14 @@
 	});
 
 	let isEmpty = $derived(sortedFiles.length === 0 && sortedFolders.length === 0);
+
+	let pageTitle = $derived(
+		fileStore.isSearching
+			? 'Search Results'
+			: fileStore.breadcrumb.length > 0
+				? fileStore.breadcrumb[fileStore.breadcrumb.length - 1].name
+				: 'All Files'
+	);
 
 	function toggleSort(field: SortField) {
 		if (sortField === field) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
@@ -144,9 +224,12 @@
 	async function openMove(type: 'file' | 'folder', item: NaratelFile | Folder) {
 		moveTarget = { type, item };
 		moveDestination = null;
+		expandedFolders = new Set([null]);
+		loadingFolders = true;
 		try {
 			allFolders = await listAllFolders();
 		} catch { allFolders = []; }
+		finally { loadingFolders = false; }
 	}
 
 	async function confirmMove() {
@@ -294,7 +377,7 @@
 				class="hover:text-foreground font-medium transition-colors"
 				class:text-foreground={fileStore.breadcrumb.length === 0 && !fileStore.isSearching}
 			>
-				My Files
+				All Files
 			</button>
 			{#if fileStore.isSearching}
 				<span class="mx-1">/</span>
@@ -318,13 +401,7 @@
 		<div class="mb-5 flex items-center justify-between gap-4 flex-wrap">
 			<div class="flex items-center gap-2">
 				<h1 class="text-lg font-semibold">
-					{#if fileStore.isSearching}
-						Search Results
-					{:else if fileStore.breadcrumb.length > 0}
-						{fileStore.breadcrumb[fileStore.breadcrumb.length - 1].name}
-					{:else}
-						My Files
-					{/if}
+					{pageTitle}
 				</h1>
 				{#if !fileStore.loading}
 					<span class="text-sm text-muted-foreground">
@@ -375,6 +452,7 @@
 						onclick={() => viewMode = 'grid'}
 						class={`px-2.5 py-1.5 text-sm transition-colors ${viewMode === 'grid' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'}`}
 						title="Grid view"
+						aria-label="Grid view"
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 							<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
@@ -385,6 +463,7 @@
 						onclick={() => viewMode = 'list'}
 						class={`px-2.5 py-1.5 text-sm transition-colors ${viewMode === 'list' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'}`}
 						title="List view"
+						aria-label="List view"
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 							<path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"/>
@@ -464,7 +543,7 @@
 						<div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
 							<DropdownMenu.Root>
 								<DropdownMenu.Trigger onclick={(e) => e.stopPropagation()}
-									class="rounded p-0.5 hover:bg-muted">
+									class="rounded p-0.5 hover:bg-muted" aria-label="More options">
 									<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
 										<circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>
 									</svg>
@@ -512,7 +591,7 @@
 						<div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
 							<DropdownMenu.Root>
 								<DropdownMenu.Trigger onclick={(e) => e.stopPropagation()}
-									class="rounded p-0.5 hover:bg-muted">
+									class="rounded p-0.5 hover:bg-muted" aria-label="More options">
 									<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
 										<circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>
 									</svg>
@@ -817,23 +896,63 @@
 	<Dialog.Content class="max-w-md">
 		<Dialog.Header>
 			<Dialog.Title>Move "{moveTarget?.item?.name}"</Dialog.Title>
-			<Dialog.Description>Select a destination folder</Dialog.Description>
+			<Dialog.Description>Choose a destination folder</Dialog.Description>
 		</Dialog.Header>
-		<div class="max-h-60 overflow-y-auto space-y-1 my-4">
-			<button
-				class={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${moveDestination === null ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'}`}
-				onclick={() => moveDestination = null}
-			>
-				📁 My Files (root)
-			</button>
-			{#each allFolders.filter(f => moveTarget?.type !== 'folder' || f.id !== moveTarget?.item?.id) as folder}
-				<button
-					class={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${moveDestination === folder.id ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'}`}
-					onclick={() => moveDestination = folder.id}
-				>
-					📁 {folder.name}
-				</button>
-			{/each}
+		<div class="my-4 rounded-lg border bg-muted/20 overflow-hidden">
+			{#if loadingFolders}
+				<div class="flex items-center justify-center py-10 text-muted-foreground">
+					<svg class="h-4 w-4 animate-spin mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+					</svg>
+					<span class="text-sm">Loading folders…</span>
+				</div>
+			{:else}
+				<div class="max-h-72 overflow-y-auto py-1">
+					{#each flatFolderList as node (node.id ?? '__root__')}
+						{@const isSelected = moveDestination === node.id}
+						{@const hasChildren = node.children.length > 0}
+						{@const isExpanded = expandedFolders.has(node.id)}
+						<div
+							class="flex items-center group hover:bg-accent/60 transition-colors"
+							style="padding-left: {node.depth * 20 + 8}px"
+						>
+							<!-- Expand/collapse chevron -->
+							<button
+								class="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded hover:bg-accent text-muted-foreground"
+								onclick={() => toggleExpand(node.id)}
+								aria-label={isExpanded ? 'Collapse' : 'Expand'}
+								disabled={!hasChildren}
+								style="visibility: {hasChildren ? 'visible' : 'hidden'}"
+							>
+								<svg xmlns="http://www.w3.org/2000/svg"
+									class="h-3.5 w-3.5 transition-transform {isExpanded ? 'rotate-90' : ''}"
+									fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+								</svg>
+							</button>
+
+							<!-- Folder row (click to select) -->
+							<button
+								class="flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors {isSelected ? 'bg-primary text-primary-foreground font-medium' : 'hover:bg-accent'}"
+								onclick={() => moveDestination = node.id}
+							>
+								<!-- Folder icon -->
+								{#if isExpanded && hasChildren}
+									<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 flex-shrink-0 {isSelected ? 'text-primary-foreground' : 'text-blue-500'}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+										<path stroke-linecap="round" stroke-linejoin="round" d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z"/>
+									</svg>
+								{:else}
+									<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 flex-shrink-0 {isSelected ? 'text-primary-foreground' : 'text-blue-500'}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+										<path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
+									</svg>
+								{/if}
+								<span class="truncate">{node.name}</span>
+							</button>
+						</div>
+					{/each}
+				</div>
+			{/if}
 		</div>
 		<Dialog.Footer class="gap-2">
 			<Button variant="outline" onclick={() => moveTarget = null} disabled={moving}>Cancel</Button>
@@ -846,36 +965,58 @@
 
 <!-- ── Preview dialog ─────────────────────────────────────────────────────── -->
 <Dialog.Root open={!!previewFile} onOpenChange={(o) => { if (!o) closePreview(); }}>
-	<Dialog.Content class="max-w-4xl max-h-[85vh]">
-		<Dialog.Header>
-			<Dialog.Title class="truncate">{previewFile?.name}</Dialog.Title>
-			<Dialog.Description>
-				{previewFile ? `${mimeLabel(previewFile.mime_type)} · ${formatBytes(previewFile.total_size)}` : ''}
-			</Dialog.Description>
-		</Dialog.Header>
-		<div class="mt-4 overflow-auto max-h-[65vh] rounded-lg border bg-muted/20">
+	<Dialog.Content class="sm:max-w-4xl max-h-[90vh] flex flex-col p-0 gap-0 overflow-hidden">
+		<!-- Header -->
+		<div class="flex items-center justify-between gap-4 border-b px-6 py-4">
+			<div class="min-w-0 flex-1">
+				<Dialog.Title class="truncate text-base font-semibold">{previewFile?.name}</Dialog.Title>
+				<Dialog.Description class="text-xs text-muted-foreground mt-0.5">
+					{previewFile ? `${mimeLabel(previewFile.mime_type)} · ${formatBytes(previewFile.total_size)}` : ''}
+				</Dialog.Description>
+			</div>
+			<div class="flex items-center gap-1.5 flex-shrink-0">
+				{#if previewFile}
+					<Button variant="ghost" size="sm" class="gap-1.5 text-muted-foreground" onclick={() => previewFile && handleDownload(previewFile)}>
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3"/>
+						</svg>
+						<span class="hidden sm:inline">Download</span>
+					</Button>
+				{/if}
+			</div>
+		</div>
+
+		<!-- Preview body -->
+		<div class="flex-1 overflow-auto min-h-0">
 			{#if previewLoading}
-				<div class="flex items-center justify-center py-20">
-					<p class="text-muted-foreground">Loading preview…</p>
+				<div class="flex flex-col items-center justify-center py-24 gap-3">
+					<svg class="h-6 w-6 animate-spin text-muted-foreground" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+					</svg>
+					<p class="text-sm text-muted-foreground">Loading preview…</p>
 				</div>
 			{:else if previewText}
-				<pre class="p-4 text-sm whitespace-pre-wrap break-all font-mono">{previewText}</pre>
+				<div class="bg-muted/30 border-b">
+					<pre class="p-6 text-sm whitespace-pre-wrap break-all font-mono leading-relaxed max-h-[70vh] overflow-auto">{previewText}</pre>
+				</div>
 			{:else if previewUrl && previewFile?.mime_type.startsWith('image/')}
-				<img src={previewUrl} alt={previewFile?.name} class="max-w-full max-h-[60vh] mx-auto object-contain" />
+				<div class="flex items-center justify-center bg-muted/10 p-4 sm:p-6">
+					<img
+						src={previewUrl}
+						alt={previewFile?.name}
+						class="max-w-full max-h-[70vh] rounded-lg object-contain shadow-sm"
+					/>
+				</div>
 			{:else if previewUrl && previewFile?.mime_type === 'application/pdf'}
-				<iframe src={previewUrl} title={previewFile?.name} class="w-full h-[60vh]"></iframe>
+				<iframe src={previewUrl} title={previewFile?.name} class="w-full h-[75vh] border-0"></iframe>
 			{:else}
-				<div class="flex items-center justify-center py-20">
-					<p class="text-muted-foreground">Preview not available for this file type</p>
+				<div class="flex flex-col items-center justify-center py-24 gap-2">
+					<p class="text-4xl">📄</p>
+					<p class="text-muted-foreground text-sm">Preview not available for this file type</p>
 				</div>
 			{/if}
 		</div>
-		<Dialog.Footer class="mt-4 gap-2">
-			<Button variant="outline" onclick={closePreview}>Close</Button>
-			{#if previewFile}
-				<Button onclick={() => previewFile && handleDownload(previewFile)}>Download</Button>
-			{/if}
-		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
 

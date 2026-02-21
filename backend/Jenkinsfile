@@ -1,0 +1,6 @@
+@Library('jenkins-pipeline-library') _
+
+standardDevSecOps([
+    appName     : 'narabox-backend',
+    dockerImage : 'devopsnaratel/narabox-backend'
+])

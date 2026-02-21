@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/naratel/naratel-box/backend/internal/auth"
+	"github.com/naratel/naratel-box/backend/internal/logger"
 	"github.com/naratel/naratel-box/backend/internal/repository"
 )
 
@@ -82,34 +84,52 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn(r.Context(), "Invalid JSON body on register", map[string]interface{}{"error": err.Error()})
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid JSON body"})
 		return
 	}
 	if req.Email == "" || req.Password == "" {
+		logger.Warn(r.Context(), "Missing email or password on register", nil)
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "email and password are required"})
 		return
 	}
 	if !emailRegex.MatchString(req.Email) {
+		logger.Warn(r.Context(), "Invalid email format on register", map[string]interface{}{"email": req.Email})
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid email format"})
 		return
 	}
 	if len(req.Password) < 8 {
+		logger.Warn(r.Context(), "Password too short on register", nil)
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "password must be at least 8 characters"})
 		return
 	}
 
 	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Failed to hash password", logger.ErrorDetails{
+			Code: "BCRYPT_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: "failed to hash password"})
 		return
 	}
 
 	user, err := h.userRepo.Create(r.Context(), req.Email, string(hashed))
 	if err != nil {
-		writeJSON(w, http.StatusConflict, ErrorResponse{Error: "conflict", Message: "email already registered"})
+		if errors.Is(err, repository.ErrEmailExists) {
+			logger.Warn(r.Context(), "Duplicate email registration attempt", map[string]interface{}{"email": req.Email})
+			writeJSON(w, http.StatusConflict, ErrorResponse{Error: "conflict", Message: "email already registered"})
+			return
+		}
+		logger.ErrorLog(r.Context(), "Failed to create user", logger.ErrorDetails{
+			Code: "USER_CREATE_ERR", Details: err.Error(),
+		})
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: "failed to create user"})
 		return
 	}
 
+	logger.Info(r.Context(), "User registered successfully", map[string]interface{}{
+		"user_id": user.ID, "email": user.Email,
+	})
 	writeJSON(w, http.StatusCreated, UserResponse{UserID: user.ID, Email: user.Email, CreatedAt: user.CreatedAt})
 }
 
@@ -127,31 +147,41 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn(r.Context(), "Invalid JSON body on login", map[string]interface{}{"error": err.Error()})
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "invalid JSON body"})
 		return
 	}
 	if req.Email == "" || req.Password == "" {
+		logger.Warn(r.Context(), "Missing email or password on login", nil)
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "email and password are required"})
 		return
 	}
 
 	user, err := h.userRepo.FindByEmail(r.Context(), req.Email)
 	if err != nil {
+		logger.Warn(r.Context(), "Login failed - user not found", map[string]interface{}{"email": req.Email})
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "invalid email or password"})
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
+		logger.Warn(r.Context(), "Login failed - invalid password", map[string]interface{}{"user_id": user.ID, "email": req.Email})
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "invalid email or password"})
 		return
 	}
 
 	token, expiresAt, err := auth.GenerateToken(user.ID, user.Email, h.jwtSecret, h.jwtExpiryHours)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Failed to generate JWT token", logger.ErrorDetails{
+			Code: "JWT_GEN_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: "failed to generate token"})
 		return
 	}
 
+	logger.Info(r.Context(), "User logged in successfully", map[string]interface{}{
+		"user_id": user.ID, "email": user.Email,
+	})
 	writeJSON(w, http.StatusOK, TokenResponse{Token: token, ExpiresAt: expiresAt})
 }
 
@@ -167,15 +197,18 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.GetUserID(r)
 	if !ok {
+		logger.Warn(r.Context(), "Unauthorized access to /auth/me", nil)
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing or invalid token"})
 		return
 	}
 
 	user, err := h.userRepo.FindByID(r.Context(), userID)
 	if err != nil {
+		logger.Warn(r.Context(), "User not found for /auth/me", map[string]interface{}{"user_id": userID})
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "user not found"})
 		return
 	}
 
+	logger.Info(r.Context(), "User profile retrieved", map[string]interface{}{"user_id": user.ID})
 	writeJSON(w, http.StatusOK, UserResponse{UserID: user.ID, Email: user.Email, CreatedAt: user.CreatedAt})
 }

@@ -1,3 +1,4 @@
+import { goto } from '$app/navigation';
 import {
 	listFolderContents,
 	uploadFile,
@@ -191,7 +192,8 @@ export const fileStore = {
 
 	navigateToFolder(folderId: number | null) {
 		fileStore.clearSelection();
-		fileStore.loadFolder(folderId);
+		const url = folderId != null ? `/dashboard?folder=${folderId}` : '/dashboard';
+		goto(url);
 	},
 
 	// ── Selection ─────────────────────────────────────────────────────────

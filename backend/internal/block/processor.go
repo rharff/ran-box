@@ -9,6 +9,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/naratel/naratel-box/backend/internal/logger"
 	"github.com/naratel/naratel-box/backend/internal/model"
 	"github.com/naratel/naratel-box/backend/internal/repository"
 	"github.com/naratel/naratel-box/backend/internal/storage"
@@ -134,12 +135,18 @@ func (p *Processor) processBlock(ctx context.Context, job blockJob) (int64, erro
 		if err := p.blockRepo.IncrementRefCount(ctx, existing.ID); err != nil {
 			return 0, err
 		}
+		logger.Info(ctx, "Block deduplication hit", map[string]interface{}{
+			"block_index": job.index, "block_id": existing.ID, "hash": job.hash, "size_bytes": len(job.data),
+		})
 		return existing.ID, nil
 	}
 
 	// ── NEW BLOCK: upload to S3 then register in DB ──
 	s3Key := job.hash // S3 object key == SHA-256 hex
 	if err := p.s3.PutObject(ctx, s3Key, bytes.NewReader(job.data), int64(len(job.data))); err != nil {
+		logger.ErrorLog(ctx, "Block S3 upload failed", logger.ErrorDetails{
+			Code: "S3_PUT_ERR", Details: fmt.Sprintf("index=%d hash=%s: %s", job.index, job.hash, err.Error()),
+		})
 		return 0, fmt.Errorf("processBlock PutObject: %w", err)
 	}
 
@@ -147,6 +154,10 @@ func (p *Processor) processBlock(ctx context.Context, job blockJob) (int64, erro
 	if err != nil {
 		return 0, fmt.Errorf("processBlock Create block record: %w", err)
 	}
+
+	logger.Info(ctx, "New block uploaded to S3", map[string]interface{}{
+		"block_index": job.index, "block_id": newBlock.ID, "hash": job.hash, "size_bytes": len(job.data),
+	})
 
 	return newBlock.ID, nil
 }
@@ -162,11 +173,17 @@ func BlocksToStream(ctx context.Context, blocks []*model.Block, s3 *storage.S3Cl
 	for _, b := range blocks {
 		body, err := s3.GetObject(ctx, b.S3Key)
 		if err != nil {
+			logger.ErrorLog(ctx, "Block stream S3 fetch failed", logger.ErrorDetails{
+				Code: "S3_GET_ERR", Details: fmt.Sprintf("s3_key=%s: %s", b.S3Key, err.Error()),
+			})
 			return fmt.Errorf("BlocksToStream GetObject key=%s: %w", b.S3Key, err)
 		}
 		_, copyErr := io.Copy(w, body)
 		body.Close()
 		if copyErr != nil {
+			logger.ErrorLog(ctx, "Block stream copy failed", logger.ErrorDetails{
+				Code: "STREAM_COPY_ERR", Details: fmt.Sprintf("s3_key=%s: %s", b.S3Key, copyErr.Error()),
+			})
 			return fmt.Errorf("BlocksToStream io.Copy key=%s: %w", b.S3Key, copyErr)
 		}
 	}

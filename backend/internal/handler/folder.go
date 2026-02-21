@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/naratel/naratel-box/backend/internal/auth"
+	"github.com/naratel/naratel-box/backend/internal/logger"
 	"github.com/naratel/naratel-box/backend/internal/model"
 	"github.com/naratel/naratel-box/backend/internal/repository"
 )
@@ -48,16 +49,23 @@ func (h *FolderHandler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 
 	var req CreateFolderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		logger.Warn(r.Context(), "Invalid folder creation request", map[string]interface{}{"user_id": userID})
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: "name is required"})
 		return
 	}
 
 	folder, err := h.folderRepo.Create(r.Context(), userID, req.ParentID, req.Name)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Failed to create folder", logger.ErrorDetails{
+			Code: "DB_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to create folder"})
 		return
 	}
 
+	logger.Info(r.Context(), "Folder created successfully", map[string]interface{}{
+		"user_id": userID, "folder_id": folder.ID, "folder_name": folder.Name, "parent_id": req.ParentID,
+	})
 	writeJSON(w, http.StatusCreated, folder)
 }
 
@@ -226,10 +234,16 @@ func (h *FolderHandler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.folderRepo.Delete(r.Context(), folderID, userID); err != nil {
+		logger.Warn(r.Context(), "Folder deletion failed", map[string]interface{}{
+			"user_id": userID, "folder_id": folderID, "error": err.Error(),
+		})
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "not_found", Message: "folder not found or unauthorized"})
 		return
 	}
 
+	logger.Info(r.Context(), "Folder deleted successfully", map[string]interface{}{
+		"user_id": userID, "folder_id": folderID,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 

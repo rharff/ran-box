@@ -11,7 +11,7 @@
 // @license.name   MIT
 // @license.url    https://opensource.org/licenses/MIT
 //
-// @host      localhost:8080
+// @host      prod3.roomify3.my.id
 // @BasePath  /api/v1
 //
 // @securityDefinitions.apikey BearerAuth
@@ -23,7 +23,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,6 +38,7 @@ import (
 	"github.com/naratel/naratel-box/backend/internal/block"
 	"github.com/naratel/naratel-box/backend/internal/config"
 	"github.com/naratel/naratel-box/backend/internal/handler"
+	"github.com/naratel/naratel-box/backend/internal/logger"
 	"github.com/naratel/naratel-box/backend/internal/repository"
 	"github.com/naratel/naratel-box/backend/internal/storage"
 
@@ -49,7 +49,7 @@ func main() {
 	// ── Config ────────────────────────────────────────────────────────────────
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("config.Load: %v", err)
+		logger.Fatalf("config.Load: %v", err)
 	}
 
 	// ── Database ──────────────────────────────────────────────────────────────
@@ -58,10 +58,10 @@ func main() {
 
 	pool, err := repository.NewPool(ctx, cfg.DSN())
 	if err != nil {
-		log.Fatalf("database connection failed: %v", err)
+		logger.Fatalf("Database connection failed: %v", err)
 	}
 	defer pool.Close()
-	log.Println("✅ Database connected")
+	logger.Infof("Database connected successfully")
 
 	// ── S3 Client ─────────────────────────────────────────────────────────────
 	s3Client, err := storage.NewS3Client(
@@ -73,9 +73,9 @@ func main() {
 		cfg.S3ForcePathStyle,
 	)
 	if err != nil {
-		log.Fatalf("S3 client init failed: %v", err)
+		logger.Fatalf("S3 client init failed: %v", err)
 	}
-	log.Println("✅ S3 client ready")
+	logger.Infof("S3 client ready (endpoint=%s, bucket=%s)", cfg.S3Endpoint, cfg.S3Bucket)
 
 	// ── Repositories ──────────────────────────────────────────────────────────
 	userRepo      := repository.NewUserRepository(pool)
@@ -99,7 +99,7 @@ func main() {
 
 	// Global middleware
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Logger)
+	r.Use(logger.Middleware)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -174,18 +174,20 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("🚀 Naratel Box API running on http://localhost%s", addr)
+		logger.Infof("Naratel Box API running on http://localhost%s", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			logger.Fatalf("Server error: %v", err)
 		}
 	}()
 
 	<-quit
-	log.Println("⏳ Shutting down gracefully...")
+	logger.Infof("Shutting down gracefully...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutdown error: %v", err)
+		logger.ErrorLog(context.Background(), "Shutdown error", logger.ErrorDetails{
+			Code: "SHUTDOWN_ERR", Details: err.Error(),
+		})
 	}
-	log.Println("👋 Server stopped")
+	logger.Infof("Server stopped")
 }

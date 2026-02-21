@@ -86,7 +86,7 @@ definitions:
       user_id:
         type: integer
     type: object
-host: localhost:8080
+host: prod3.roomify3.my.id
 info:
   contact:
     email: dev@naratel.id

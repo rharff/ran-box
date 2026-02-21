@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { browser } from '$app/environment';
 	import { auth } from '$lib/auth.svelte';
 	import { fileStore } from '$lib/file-store.svelte';
 	import { formatBytes } from '$lib/utils/format';
@@ -9,9 +10,9 @@
 	let { children } = $props();
 
 	$effect(() => {
-		if (!auth.isAuthenticated) goto('/login');
+		if (!browser || !auth.initialized) return;
+		if (!auth.isAuthenticated) goto('/login', { replaceState: true });
 	});
-	$effect(() => { auth.init(); });
 
 	const DISPLAY_CAP = 15 * 1024 * 1024 * 1024;
 	let usedPct = $derived(Math.min((fileStore.totalSize / DISPLAY_CAP) * 100, 100));
@@ -39,7 +40,7 @@
 	}}
 />
 
-{#if auth.isAuthenticated}
+{#if auth.initialized && auth.isAuthenticated}
 <div class="flex h-screen overflow-hidden bg-background">
 
 	<!-- ── Mobile drawer backdrop ── -->
@@ -90,7 +91,7 @@
 				<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
 				</svg>
-				<span class={sidebarOpen ? 'md:inline' : 'md:hidden'}>My Files</span>
+				<span class={sidebarOpen ? 'md:inline' : 'md:hidden'}>All Files</span>
 			</button>
 		</nav>
 
@@ -163,6 +164,16 @@
 		<main class="flex-1 overflow-y-auto">
 			{@render children()}
 		</main>
+	</div>
+</div>
+{:else}
+<div class="flex min-h-screen items-center justify-center bg-background">
+	<div class="flex items-center gap-3 text-muted-foreground">
+		<svg class="h-5 w-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+			<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+			<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+		</svg>
+		<span class="text-sm">Loading…</span>
 	</div>
 </div>
 {/if}

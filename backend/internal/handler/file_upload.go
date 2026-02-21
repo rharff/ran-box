@@ -13,6 +13,7 @@ import (
 
 	"github.com/naratel/naratel-box/backend/internal/auth"
 	"github.com/naratel/naratel-box/backend/internal/block"
+	"github.com/naratel/naratel-box/backend/internal/logger"
 	"github.com/naratel/naratel-box/backend/internal/model"
 	"github.com/naratel/naratel-box/backend/internal/repository"
 )
@@ -56,11 +57,16 @@ func NewUploadHandler(fileRepo *repository.FileRepository, processor *block.Proc
 func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.GetUserID(r)
 	if !ok {
+		logger.Warn(r.Context(), "Unauthorized upload attempt", nil)
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized"})
 		return
 	}
 
-	if err := r.ParseMultipartForm(512 << 20); err != nil {
+	// 256MB in RAM; larger files spill to /tmp on disk to avoid OOMKill (pod limit: 512Mi)
+	if err := r.ParseMultipartForm(256 << 20); err != nil {
+		logger.Warn(r.Context(), "Failed to parse multipart form", map[string]interface{}{
+			"user_id": userID, "error": err.Error(),
+		})
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{
 			Error:   "bad_request",
 			Message: "failed to parse multipart form: " + err.Error(),
@@ -71,6 +77,7 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	f, fileHeader, err := r.FormFile("file")
 	if err != nil {
+		logger.Warn(r.Context(), "Missing file field in upload", map[string]interface{}{"user_id": userID})
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{
 			Error:   "bad_request",
 			Message: "field 'file' is required",
@@ -95,11 +102,26 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		mimeType = "application/octet-stream"
 	}
 
+	logger.Info(r.Context(), "File upload started", map[string]interface{}{
+		"user_id":   userID,
+		"file_name": fileHeader.Filename,
+		"mime_type": mimeType,
+		"file_size": fileHeader.Size,
+	})
+
 	ctx, ctxCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer ctxCancel()
 
+	// Propagate request context values to the new context
+	ctx = logger.WithRequestID(ctx, logger.GetRequestID(r.Context()))
+	ctx = logger.WithMethod(ctx, logger.GetMethod(r.Context()))
+	ctx = logger.WithPath(ctx, logger.GetPath(r.Context()))
+
 	blockIDs, totalBytes, err := h.processor.Process(ctx, f)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "File upload block processing failed", logger.ErrorDetails{
+			Code: "UPLOAD_PROCESS_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
 			Error:   "upload_failed",
 			Message: err.Error(),
@@ -109,6 +131,9 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	file, err := h.fileRepo.Create(ctx, userID, fileHeader.Filename, mimeType, totalBytes, folderID)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Failed to save file metadata", logger.ErrorDetails{
+			Code: "DB_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
 			Error:   "db_error",
 			Message: "failed to save file metadata",
@@ -117,12 +142,23 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.fileRepo.LinkBlocks(ctx, file.ID, blockIDs); err != nil {
+		logger.ErrorLog(r.Context(), "Failed to link blocks to file", logger.ErrorDetails{
+			Code: "DB_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
 			Error:   "db_error",
 			Message: "failed to link blocks",
 		})
 		return
 	}
+
+	logger.Info(r.Context(), "File uploaded successfully", map[string]interface{}{
+		"user_id":     userID,
+		"file_id":     file.ID,
+		"file_name":   file.Name,
+		"total_size":  totalBytes,
+		"blocks_count": len(blockIDs),
+	})
 
 	writeJSON(w, http.StatusCreated, UploadResponse{
 		FileID:      file.ID,
@@ -155,8 +191,14 @@ func (h *UploadHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 
 	// Search mode
 	if q := r.URL.Query().Get("search"); q != "" {
+		logger.Info(r.Context(), "File search initiated", map[string]interface{}{
+			"user_id": userID, "search_query": q,
+		})
 		files, err := h.fileRepo.Search(r.Context(), userID, q)
 		if err != nil {
+			logger.ErrorLog(r.Context(), "File search failed", logger.ErrorDetails{
+				Code: "DB_ERR", Details: err.Error(),
+			})
 			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "search failed"})
 			return
 		}
@@ -183,6 +225,9 @@ func (h *UploadHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 
 	files, err := h.fileRepo.ListByFolder(r.Context(), userID, folderID)
 	if err != nil {
+		logger.ErrorLog(r.Context(), "Failed to list files", logger.ErrorDetails{
+			Code: "DB_ERR", Details: err.Error(),
+		})
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "db_error", Message: "failed to list files"})
 		return
 	}

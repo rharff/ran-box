@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
+	import { browser } from '$app/environment';
 	import { auth } from '$lib/auth.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -8,6 +10,13 @@
 	let email = $state('');
 	let password = $state('');
 	let error = $state('');
+
+	// Redirect authenticated users to dashboard
+	$effect(() => {
+		if (browser && auth.initialized && auth.isAuthenticated) {
+			goto('/dashboard', { replaceState: true });
+		}
+	});
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();

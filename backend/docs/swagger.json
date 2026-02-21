@@ -14,7 +14,7 @@
         },
         "version": "1.0"
     },
-    "host": "localhost:8080",
+    "host": "prod3.roomify3.my.id",
     "basePath": "/api/v1",
     "paths": {
         "/auth/login": {
